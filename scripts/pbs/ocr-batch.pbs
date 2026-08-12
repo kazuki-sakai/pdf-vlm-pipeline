@@ -1,0 +1,61 @@
+#!/bin/bash
+#PBS -N pdf-vlm-ocr-batch
+#PBS -q gpu
+#PBS -l select=1:ncpus=4:mem=32gb:ngpus=1
+#PBS -l walltime=24:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+PROJECT_ROOT="${PBS_O_WORKDIR:?PBS_O_WORKDIR is not set}"
+SIF_IMAGE="${PDF_VLM_OCR_SIF:-$HOME/local/containers/paddleocr-vl-1.6-paddlex-3.7.2-r1.sif}"
+DATA_ROOT="${PDF_VLM_DATA_ROOT:-$HOME/local/pdf-vlm}"
+OCR_SCRIPT="$PROJECT_ROOT/src/pdf_vlm_pipeline/ocr_batch.py"
+
+if [ ! -r "$SIF_IMAGE" ]; then
+    echo "SIF not found or unreadable: $SIF_IMAGE" >&2
+    exit 1
+fi
+
+if [ ! -r "$OCR_SCRIPT" ]; then
+    echo "OCR script not found or unreadable: $OCR_SCRIPT" >&2
+    exit 1
+fi
+
+mkdir -p \
+    "$DATA_ROOT/inbox" \
+    "$DATA_ROOT/artifacts" \
+    "$DATA_ROOT/failures" \
+    "$DATA_ROOT/state" \
+    "$DATA_ROOT/cache/paddlex" \
+    "$DATA_ROOT/cache/huggingface"
+
+export OMP_NUM_THREADS=1
+export PYTHONUNBUFFERED=1
+export PADDLE_PDX_CACHE_HOME="$DATA_ROOT/cache/paddlex"
+export PADDLE_PDX_MODEL_SOURCE="huggingface"
+export PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=1
+export HF_HOME="$DATA_ROOT/cache/huggingface"
+
+export APPTAINERENV_OMP_NUM_THREADS="$OMP_NUM_THREADS"
+export APPTAINERENV_PYTHONUNBUFFERED="$PYTHONUNBUFFERED"
+export APPTAINERENV_PADDLE_PDX_CACHE_HOME="$PADDLE_PDX_CACHE_HOME"
+export APPTAINERENV_PADDLE_PDX_MODEL_SOURCE="$PADDLE_PDX_MODEL_SOURCE"
+export APPTAINERENV_PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK="$PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"
+export APPTAINERENV_HF_HOME="$HF_HOME"
+
+echo "=== OCR batch ==="
+echo "Project: $PROJECT_ROOT"
+echo "Data: $DATA_ROOT"
+echo "SIF: $SIF_IMAGE"
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+nvidia-smi -L
+
+OCR_ARGS=(--data-root "$DATA_ROOT")
+if [ "${PDF_VLM_RETRY_FAILED:-0}" = "1" ]; then
+    OCR_ARGS+=(--retry-failed)
+fi
+
+apptainer exec --nv "$SIF_IMAGE" \
+    python3 "$OCR_SCRIPT" \
+    "${OCR_ARGS[@]}"

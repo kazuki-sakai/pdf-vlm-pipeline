@@ -1,0 +1,40 @@
+# pdf-vlm-pipeline
+
+PDFをPaddleOCR-VLでMarkdown・JSON・画像へ変換し、VLMとの対話に利用するためのパイプラインです。
+
+現在の実装範囲は、OpenPBS上で`inbox/`内の未処理PDFを変換するOCRバッチです。
+
+## OCRバッチ
+
+既定の配置は次のとおりです。
+
+```text
+~/local/pdf-vlm/
+├── inbox/
+├── artifacts/<sha256>/
+├── failures/<sha256>/
+├── state/
+└── cache/
+```
+
+PBSジョブはリポジトリのルートから投入します。
+
+```bash
+qsub scripts/pbs/ocr-batch.pbs
+```
+
+既定値を変更する場合は`qsub -v`で渡します。
+
+```bash
+qsub -v \
+PDF_VLM_DATA_ROOT=/path/to/data,PDF_VLM_OCR_SIF=/path/to/paddleocr.sif \
+scripts/pbs/ocr-batch.pbs
+```
+
+処理済み判定にはPDF内容のSHA-256を使用します。同じ内容のPDFはファイル名が異なっても再処理しません。失敗したPDFは隔離され、他のPDFの処理を妨げません。再試行する場合は次のように指定します。
+
+```bash
+qsub -v \
+PDF_VLM_DATA_ROOT=/path/to/data,PDF_VLM_RETRY_FAILED=1 \
+scripts/pbs/ocr-batch.pbs
+```
