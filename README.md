@@ -44,3 +44,17 @@ scripts/pbs/ocr-batch.pbs
 ```bash
 qsub -v PDF_VLM_RECOVER_QUARANTINED=1 scripts/pbs/ocr-batch.pbs
 ```
+
+## vLLMコンテナ
+
+Qwen VLM用の推論サーバにはvLLM 0.19.1を使用します。公式コンテナをSIFへ変換するジョブは、リポジトリのルートから投入します。
+
+```bash
+qsub scripts/pbs/vllm-pull.pbs
+```
+
+既定の出力先は次のとおりです。
+
+```text
+~/local/containers/vllm-openai-0.19.1.sif
+```

@@ -1,0 +1,36 @@
+#!/bin/bash
+#PBS -N pdf-vlm-vllm-pull
+#PBS -q cpu
+#PBS -l select=1:ncpus=4:mem=64gb
+#PBS -l walltime=12:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+SOURCE_IMAGE="${PDF_VLM_VLLM_SOURCE:-docker://vllm/vllm-openai:v0.19.1}"
+SIF_IMAGE="${PDF_VLM_VLLM_SIF:-$HOME/local/containers/vllm-openai-0.19.1.sif}"
+
+mkdir -p "$(dirname "$SIF_IMAGE")"
+
+echo "=== vLLM image pull ==="
+echo "Source: $SOURCE_IMAGE"
+echo "Destination: $SIF_IMAGE"
+echo "Node: $(hostname)"
+echo "PBS_JOBID=${PBS_JOBID:-<unset>}"
+free -h
+df -h "$(dirname "$SIF_IMAGE")" /tmp
+
+if [ -e "$SIF_IMAGE" ]; then
+    echo "FATAL: destination already exists: $SIF_IMAGE" >&2
+    echo "Refusing to overwrite it." >&2
+    exit 2
+fi
+
+# Limiting SquashFS workers also limits peak memory during SIF creation.
+export APPTAINER_MKSQUASHFS_ARGS="-processors 2"
+apptainer pull "$SIF_IMAGE" "$SOURCE_IMAGE"
+
+echo "=== Image ==="
+ls -lh "$SIF_IMAGE"
+apptainer inspect "$SIF_IMAGE"
+echo "vLLM image pull: OK"
