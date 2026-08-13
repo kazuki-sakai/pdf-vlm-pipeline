@@ -1,0 +1,59 @@
+#!/bin/bash
+#PBS -N pdf-vlm-vllm-gpu-probe
+#PBS -q gpu
+#PBS -l select=1:ncpus=4:mem=32gb:ngpus=1
+#PBS -l walltime=01:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+SIF_IMAGE="${PDF_VLM_VLLM_SIF:-$HOME/local/containers/vllm-openai-0.19.1.sif}"
+
+if [ ! -r "$SIF_IMAGE" ]; then
+    echo "FATAL: SIF not found or unreadable: $SIF_IMAGE" >&2
+    exit 1
+fi
+
+echo "=== Image ==="
+ls -lh "$SIF_IMAGE"
+echo "=== Assigned GPU ==="
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+nvidia-smi -L
+nvidia-smi --query-gpu=index,name,uuid,memory.total,driver_version \
+    --format=csv,noheader
+
+echo "=== Container versions and GPU ==="
+apptainer exec --nv "$SIF_IMAGE" python3 - <<'PY'
+import platform
+
+import torch
+import vllm
+
+print("Python:", platform.python_version())
+print("PyTorch:", torch.__version__)
+print("PyTorch CUDA runtime:", torch.version.cuda)
+print("vLLM:", vllm.__version__)
+print("CUDA available:", torch.cuda.is_available())
+print("Visible GPU count:", torch.cuda.device_count())
+
+if not torch.cuda.is_available():
+    raise RuntimeError("CUDA is not available inside the vLLM container")
+
+for index in range(torch.cuda.device_count()):
+    properties = torch.cuda.get_device_properties(index)
+    print(f"device {index}: {properties.name}")
+    print(f"compute capability {index}: {properties.major}.{properties.minor}")
+    print(f"total memory {index}: {properties.total_memory / 1024**3:.2f} GiB")
+
+left = torch.randn((2048, 2048), device="cuda", dtype=torch.float16)
+right = torch.randn((2048, 2048), device="cuda", dtype=torch.float16)
+result = left @ right
+torch.cuda.synchronize()
+print("Matrix shape:", tuple(result.shape))
+print("Matrix mean:", result.float().mean().item())
+print("vLLM container GPU probe: OK")
+PY
+
+echo "=== GPU after probe ==="
+nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu \
+    --format=csv,noheader

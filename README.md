@@ -58,3 +58,9 @@ qsub scripts/pbs/vllm-pull.pbs
 ```text
 ~/local/containers/vllm-openai-0.19.1.sif
 ```
+
+SIF作成後、モデルをロードせずにGPU・CUDA・vLLMの基本動作を確認します。
+
+```bash
+qsub scripts/pbs/vllm-gpu-probe.pbs
+```
