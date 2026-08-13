@@ -64,3 +64,15 @@ SIF作成後、モデルをロードせずにGPU・CUDA・vLLMの基本動作を
 ```bash
 qsub scripts/pbs/vllm-gpu-probe.pbs
 ```
+
+基本動作の確認後、Qwen3.6-35B-A3B-FP8を共有ホームへダウンロードします。
+
+```bash
+qsub scripts/pbs/qwen-download.pbs
+```
+
+既定の保存先は次のとおりです。中断した場合は同じジョブを再投入すると、ダウンロード済みファイルを利用して再開します。
+
+```text
+~/local/pdf-vlm/models/Qwen3.6-35B-A3B-FP8
+```

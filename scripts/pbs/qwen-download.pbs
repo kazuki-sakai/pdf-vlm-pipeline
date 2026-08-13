@@ -1,0 +1,116 @@
+#!/bin/bash
+#PBS -N pdf-vlm-qwen-download
+#PBS -q cpu
+#PBS -l select=1:ncpus=4:mem=32gb
+#PBS -l walltime=24:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+SIF_IMAGE="${PDF_VLM_VLLM_SIF:-$HOME/local/containers/vllm-openai-0.19.1.sif}"
+DATA_ROOT="${PDF_VLM_DATA_ROOT:-$HOME/local/pdf-vlm}"
+MODEL_REPO="${PDF_VLM_MODEL_REPO:-Qwen/Qwen3.6-35B-A3B-FP8}"
+MODEL_NAME="${PDF_VLM_MODEL_NAME:-Qwen3.6-35B-A3B-FP8}"
+MODEL_REVISION="${PDF_VLM_MODEL_REVISION:-main}"
+MODEL_ROOT="$DATA_ROOT/models"
+MODEL_DIR="$MODEL_ROOT/$MODEL_NAME"
+PARTIAL_DIR="$MODEL_ROOT/.$MODEL_NAME.partial"
+HF_CACHE="$DATA_ROOT/cache/huggingface"
+
+if [ ! -r "$SIF_IMAGE" ]; then
+    echo "FATAL: SIF not found or unreadable: $SIF_IMAGE" >&2
+    exit 1
+fi
+
+mkdir -p "$MODEL_ROOT" "$HF_CACHE"
+
+echo "=== Qwen model download ==="
+echo "Repository: $MODEL_REPO"
+echo "Revision: $MODEL_REVISION"
+echo "Destination: $MODEL_DIR"
+echo "Partial: $PARTIAL_DIR"
+echo "Node: $(hostname)"
+echo "PBS_JOBID=${PBS_JOBID:-<unset>}"
+df -h "$MODEL_ROOT"
+
+if [ -f "$MODEL_DIR/.complete" ]; then
+    echo "Model is already complete: $MODEL_DIR"
+    exit 0
+fi
+if [ -e "$MODEL_DIR" ]; then
+    echo "FATAL: destination exists without .complete: $MODEL_DIR" >&2
+    exit 2
+fi
+
+export HF_HOME="$HF_CACHE"
+export HF_HUB_DOWNLOAD_TIMEOUT=120
+export HF_HUB_ETAG_TIMEOUT=30
+export APPTAINERENV_HF_HOME="$HF_HOME"
+export APPTAINERENV_HF_HUB_DOWNLOAD_TIMEOUT="$HF_HUB_DOWNLOAD_TIMEOUT"
+export APPTAINERENV_HF_HUB_ETAG_TIMEOUT="$HF_HUB_ETAG_TIMEOUT"
+export PDF_VLM_DOWNLOAD_REPO="$MODEL_REPO"
+export PDF_VLM_DOWNLOAD_REVISION="$MODEL_REVISION"
+export PDF_VLM_DOWNLOAD_DIR="$PARTIAL_DIR"
+export PDF_VLM_DOWNLOAD_JOB_ID="${PBS_JOBID:-}"
+export APPTAINERENV_PDF_VLM_DOWNLOAD_REPO="$PDF_VLM_DOWNLOAD_REPO"
+export APPTAINERENV_PDF_VLM_DOWNLOAD_REVISION="$PDF_VLM_DOWNLOAD_REVISION"
+export APPTAINERENV_PDF_VLM_DOWNLOAD_DIR="$PDF_VLM_DOWNLOAD_DIR"
+export APPTAINERENV_PDF_VLM_DOWNLOAD_JOB_ID="$PDF_VLM_DOWNLOAD_JOB_ID"
+
+# snapshot_download resumes files already present in PARTIAL_DIR and verifies
+# downloaded blobs before returning. The directory is promoted only afterward.
+apptainer exec "$SIF_IMAGE" python3 - <<'PY'
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+from huggingface_hub import HfApi, snapshot_download
+
+repo_id = os.environ["PDF_VLM_DOWNLOAD_REPO"]
+requested_revision = os.environ["PDF_VLM_DOWNLOAD_REVISION"]
+partial_dir = Path(os.environ["PDF_VLM_DOWNLOAD_DIR"])
+partial_dir.mkdir(parents=True, exist_ok=True)
+
+api = HfApi()
+info = api.model_info(repo_id=repo_id, revision=requested_revision)
+resolved_revision = info.sha
+print(f"Resolved revision: {resolved_revision}", flush=True)
+
+snapshot_download(
+    repo_id=repo_id,
+    revision=resolved_revision,
+    local_dir=partial_dir,
+    max_workers=4,
+)
+
+files = [
+    path
+    for path in partial_dir.rglob("*")
+    if path.is_file() and ".cache/huggingface" not in path.as_posix()
+]
+total_bytes = sum(path.stat().st_size for path in files)
+manifest = {
+    "schema_version": 1,
+    "repository": repo_id,
+    "requested_revision": requested_revision,
+    "resolved_revision": resolved_revision,
+    "downloaded_at": datetime.now(timezone.utc).isoformat(),
+    "file_count": len(files),
+    "total_bytes": total_bytes,
+    "pbs_job_id": os.environ.get("PDF_VLM_DOWNLOAD_JOB_ID") or None,
+}
+(partial_dir / "download-manifest.json").write_text(
+    json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8",
+)
+(partial_dir / ".complete").touch()
+print(json.dumps(manifest, ensure_ascii=False, sort_keys=True), flush=True)
+PY
+
+mv "$PARTIAL_DIR" "$MODEL_DIR"
+
+echo "=== Model ==="
+du -sh "$MODEL_DIR"
+find "$MODEL_DIR" -maxdepth 1 -type f -printf '%f\n' | sort
+echo "Qwen model download: OK"
