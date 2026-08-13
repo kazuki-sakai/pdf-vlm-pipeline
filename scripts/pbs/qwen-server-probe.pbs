@@ -1,0 +1,202 @@
+#!/bin/bash
+#PBS -N pdf-vlm-qwen-server-probe
+#PBS -q llm
+#PBS -l select=1:ncpus=10:mem=96gb:ngpus=2
+#PBS -l walltime=02:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+SIF_IMAGE="${PDF_VLM_VLLM_SIF:-$HOME/local/containers/vllm-openai-0.19.1.sif}"
+DATA_ROOT="${PDF_VLM_DATA_ROOT:-$HOME/local/pdf-vlm}"
+MODEL_DIR="${PDF_VLM_MODEL_DIR:-$DATA_ROOT/models/Qwen3.6-35B-A3B-FP8}"
+SERVED_MODEL_NAME="${PDF_VLM_SERVED_MODEL_NAME:-qwen-research}"
+PORT="${PDF_VLM_VLLM_PORT:-18765}"
+STATE_ROOT="$DATA_ROOT/state"
+JOB_ID_SAFE="${PBS_JOBID:-pid-$$}"
+JOB_ID_SAFE="${JOB_ID_SAFE//[^A-Za-z0-9_.-]/_}"
+SERVER_LOG="$STATE_ROOT/vllm-probe-$JOB_ID_SAFE.log"
+
+if [ ! -r "$SIF_IMAGE" ]; then
+    echo "FATAL: SIF not found or unreadable: $SIF_IMAGE" >&2
+    exit 1
+fi
+if [ ! -f "$MODEL_DIR/.complete" ]; then
+    echo "FATAL: model is not marked complete: $MODEL_DIR" >&2
+    exit 1
+fi
+
+mkdir -p "$STATE_ROOT" "$DATA_ROOT/cache/huggingface"
+
+mapfile -t IMAGE_RECORDS < <(
+    find "$DATA_ROOT/artifacts" -path '*/merged/imgs/*' -type f \
+        \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) \
+        -printf '%s\t%p\n' | sort -nr
+)
+if [ "${#IMAGE_RECORDS[@]}" -eq 0 ]; then
+    echo "FATAL: no merged artifact image is available for the VLM probe" >&2
+    exit 1
+fi
+PROBE_IMAGE="${IMAGE_RECORDS[0]#*$'\t'}"
+
+echo "=== Qwen vLLM server probe ==="
+echo "Node: $(hostname)"
+echo "Model: $MODEL_DIR"
+echo "Served model: $SERVED_MODEL_NAME"
+echo "Port: $PORT"
+echo "Probe image: $PROBE_IMAGE"
+echo "Server log: $SERVER_LOG"
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+nvidia-smi -L
+nvidia-smi --query-gpu=index,name,uuid,memory.total,driver_version \
+    --format=csv,noheader
+
+export HF_HOME="$DATA_ROOT/cache/huggingface"
+export APPTAINERENV_HF_HOME="$HF_HOME"
+export TOKENIZERS_PARALLELISM=false
+export APPTAINERENV_TOKENIZERS_PARALLELISM="$TOKENIZERS_PARALLELISM"
+
+SERVER_PID=""
+cleanup() {
+    if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "Stopping vLLM server process group $SERVER_PID..."
+        kill -TERM -- "-$SERVER_PID" 2>/dev/null || true
+        for _ in {1..30}; do
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+                break
+            fi
+            sleep 1
+        done
+        if kill -0 "$SERVER_PID" 2>/dev/null; then
+            kill -KILL -- "-$SERVER_PID" 2>/dev/null || true
+        fi
+        wait "$SERVER_PID" 2>/dev/null || true
+    fi
+    SERVER_PID=""
+}
+trap cleanup EXIT TERM INT
+
+echo "Starting vLLM..."
+setsid apptainer exec --nv "$SIF_IMAGE" \
+    vllm serve "$MODEL_DIR" \
+    --host 0.0.0.0 \
+    --port "$PORT" \
+    --served-model-name "$SERVED_MODEL_NAME" \
+    --tensor-parallel-size 2 \
+    --distributed-executor-backend mp \
+    --max-model-len 16384 \
+    --max-num-batched-tokens 16384 \
+    --max-num-seqs 2 \
+    --gpu-memory-utilization 0.90 \
+    --limit-mm-per-prompt '{"image":1,"video":0}' \
+    --reasoning-parser qwen3 \
+    --enforce-eager \
+    >"$SERVER_LOG" 2>&1 &
+SERVER_PID=$!
+echo "vLLM launcher PID: $SERVER_PID"
+
+READY=0
+for attempt in {1..360}; do
+    if curl --fail --silent --show-error \
+        --connect-timeout 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+        READY=1
+        break
+    fi
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "FATAL: vLLM exited before becoming ready" >&2
+        tail -n 200 "$SERVER_LOG" >&2 || true
+        exit 1
+    fi
+    if (( attempt % 12 == 0 )); then
+        echo "Waiting for vLLM readiness (${attempt} checks)..."
+        tail -n 5 "$SERVER_LOG" || true
+    fi
+    sleep 5
+done
+if [ "$READY" -ne 1 ]; then
+    echo "FATAL: vLLM did not become ready within 30 minutes" >&2
+    tail -n 200 "$SERVER_LOG" >&2 || true
+    exit 1
+fi
+
+echo "vLLM is ready."
+curl --fail --silent --show-error "http://127.0.0.1:$PORT/v1/models"
+echo
+
+export PDF_VLM_PROBE_URL="http://127.0.0.1:$PORT/v1/chat/completions"
+export PDF_VLM_PROBE_MODEL="$SERVED_MODEL_NAME"
+export PDF_VLM_PROBE_IMAGE="$PROBE_IMAGE"
+
+python3 - <<'PY'
+import base64
+import json
+import mimetypes
+import os
+from pathlib import Path
+from urllib.request import Request, urlopen
+
+url = os.environ["PDF_VLM_PROBE_URL"]
+model = os.environ["PDF_VLM_PROBE_MODEL"]
+
+
+def chat(label, content):
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+        "max_tokens": 128,
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "top_k": 20,
+        "presence_penalty": 1.5,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    request = Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=600) as response:
+        result = json.load(response)
+    message = result["choices"][0]["message"]
+    answer = message.get("content") or message.get("reasoning_content") or ""
+    if not answer.strip():
+        raise RuntimeError(f"{label} response is empty: {result}")
+    print(f"=== {label} response ===")
+    print(answer.strip())
+    print(f"{label} usage:", json.dumps(result.get("usage", {}), sort_keys=True))
+
+
+chat("Text", "日本語で一文だけ、あなたが画像も理解できる研究支援用VLMであると説明してください。")
+
+image_path = Path(os.environ["PDF_VLM_PROBE_IMAGE"])
+mime_type = mimetypes.guess_type(image_path.name)[0] or "image/jpeg"
+data_url = (
+    f"data:{mime_type};base64,"
+    + base64.b64encode(image_path.read_bytes()).decode("ascii")
+)
+chat(
+    "Image",
+    [
+        {"type": "image_url", "image_url": {"url": data_url}},
+        {
+            "type": "text",
+            "text": "この研究資料の画像について、読み取れる内容を日本語で簡潔に説明してください。",
+        },
+    ],
+)
+PY
+
+echo "=== GPU while serving ==="
+nvidia-smi --query-gpu=index,name,memory.used,memory.total,power.draw,utilization.gpu \
+    --format=csv,noheader
+echo "=== Server log tail ==="
+tail -n 80 "$SERVER_LOG"
+
+cleanup
+trap - EXIT TERM INT
+sleep 5
+echo "=== GPU after shutdown ==="
+nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu \
+    --format=csv,noheader
+echo "Qwen vLLM server probe: OK"

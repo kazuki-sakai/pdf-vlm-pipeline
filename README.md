@@ -76,3 +76,9 @@ qsub scripts/pbs/qwen-download.pbs
 ```text
 ~/local/pdf-vlm/models/Qwen3.6-35B-A3B-FP8
 ```
+
+ダウンロード後、RTX 3090を2枚使ってvLLMを一時起動し、テキスト入力と画像入力を検査します。検査後、サーバーは自動終了します。
+
+```bash
+qsub scripts/pbs/qwen-server-probe.pbs
+```
