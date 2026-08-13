@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import json
 import sys
 import unittest
@@ -17,6 +18,22 @@ SPEC.loader.exec_module(ocr_batch)
 
 
 class OcrBatchTests(unittest.TestCase):
+    @staticmethod
+    def make_valid_artifact(artifact: Path, digest: str) -> None:
+        page = artifact / "raw" / "page-0001"
+        merged = artifact / "merged"
+        page.mkdir(parents=True)
+        merged.mkdir(parents=True)
+        (artifact / "original.pdf").write_bytes(b"%PDF-test")
+        (artifact / "manifest.json").write_text(
+            json.dumps({"source_sha256": digest, "page_count": 1}),
+            encoding="utf-8",
+        )
+        (page / "page.md").write_text("page\n", encoding="utf-8")
+        (page / "page_res.json").write_text("{}", encoding="utf-8")
+        (merged / "document.md").write_text("document\n", encoding="utf-8")
+        (merged / "document_res.json").write_text("{}", encoding="utf-8")
+
     def test_discover_skips_complete_quarantined_and_duplicate(self) -> None:
         with TemporaryDirectory() as temporary:
             tmp_path = Path(temporary)
@@ -85,12 +102,39 @@ class OcrBatchTests(unittest.TestCase):
             )
             (merged / "document_res.json").write_text("{}", encoding="utf-8")
             (merged / "imgs" / "merged.jpg").write_bytes(b"merged-image")
+            (merged / "imgs" / "decorative.jpg").write_bytes(b"header-image")
 
             counts = ocr_batch.validate_artifact(artifact)
 
             self.assertEqual(counts["raw_markdown_files"], 1)
             self.assertEqual(counts["image_references"], 2)
-            self.assertEqual(counts["image_files"], 2)
+            self.assertEqual(counts["image_files"], 3)
+            self.assertEqual(counts["unreferenced_image_files"], 1)
+
+    def test_recover_quarantined_artifact_without_ocr(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact_root = root / "artifacts"
+            failure_root = root / "failures"
+            artifact_root.mkdir()
+
+            digest = hashlib.sha256(b"%PDF-test").hexdigest()
+            attempt = failure_root / digest / "attempt-test"
+            self.make_valid_artifact(attempt, digest)
+            (attempt / "failure.json").write_text("{}", encoding="utf-8")
+
+            summary = ocr_batch.BatchSummary()
+            ocr_batch.recover_quarantined_artifacts(
+                artifact_root=artifact_root,
+                failure_root=failure_root,
+                summary=summary,
+            )
+
+            recovered = artifact_root / digest
+            self.assertEqual(summary.recovered, 1)
+            self.assertTrue((recovered / ".complete").is_file())
+            self.assertTrue((recovered / "previous-failure.json").is_file())
+            self.assertFalse(attempt.exists())
 
 
 if __name__ == "__main__":

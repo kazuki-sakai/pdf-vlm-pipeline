@@ -54,6 +54,7 @@ class BatchSummary:
     already_complete: int = 0
     duplicate: int = 0
     quarantined: int = 0
+    recovered: int = 0
     deferred: int = 0
     failed: int = 0
 
@@ -65,6 +66,7 @@ class BatchSummary:
             "already_complete": self.already_complete,
             "duplicate": self.duplicate,
             "quarantined": self.quarantined,
+            "recovered": self.recovered,
             "deferred": self.deferred,
             "failed": self.failed,
         }
@@ -284,9 +286,19 @@ def validate_artifact(artifact: Path) -> dict[str, int]:
         for path in artifact.rglob("*")
         if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
     }
+    # PaddleOCR-VL can save decorative/header crops that it deliberately omits
+    # from Markdown.  They are useful source material and do not make the
+    # artifact invalid.  Missing files referenced by Markdown remain errors.
     unreferenced = all_images - referenced_images
     if unreferenced:
-        errors.append(f"{len(unreferenced)} generated image(s) are unreferenced")
+        relative_paths = sorted(
+            str(path.relative_to(artifact.resolve())) for path in unreferenced
+        )
+        print(
+            "WARNING: generated image(s) not referenced by Markdown: "
+            + ", ".join(relative_paths),
+            flush=True,
+        )
 
     if errors:
         raise RuntimeError("artifact validation failed:\n - " + "\n - ".join(errors))
@@ -298,7 +310,67 @@ def validate_artifact(artifact: Path) -> dict[str, int]:
         "merged_json_files": len(merged_json),
         "image_references": reference_count,
         "image_files": len(all_images),
+        "unreferenced_image_files": len(unreferenced),
     }
+
+
+def recover_quarantined_artifacts(
+    *, artifact_root: Path, failure_root: Path, summary: BatchSummary
+) -> None:
+    """Promote complete attempts that pass the current artifact validator."""
+
+    for document_failure_root in sorted(failure_root.iterdir()):
+        if not document_failure_root.is_dir():
+            continue
+
+        digest = document_failure_root.name
+        artifact_dir = artifact_root / digest
+        if artifact_dir.exists():
+            continue
+
+        attempts = sorted(
+            (
+                path
+                for path in document_failure_root.glob("attempt-*")
+                if path.is_dir()
+            ),
+            reverse=True,
+        )
+        for attempt_dir in attempts:
+            try:
+                validation = validate_artifact(attempt_dir)
+            except Exception as exc:  # noqa: BLE001 - try an older attempt
+                print(
+                    f"RECOVERY SKIP {attempt_dir}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
+
+            manifest_path = attempt_dir / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if manifest.get("source_sha256") != digest:
+                print(
+                    f"RECOVERY SKIP {attempt_dir}: directory hash does not match manifest",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
+
+            manifest["validation"] = validation
+            manifest["recovered_at"] = utc_now().isoformat()
+            manifest["recovered_from"] = str(attempt_dir)
+            atomic_write_json(manifest_path, manifest)
+
+            failure_record = attempt_dir / "failure.json"
+            if failure_record.exists():
+                os.replace(failure_record, attempt_dir / "previous-failure.json")
+
+            (attempt_dir / ".complete").touch()
+            os.replace(attempt_dir, artifact_dir)
+            summary.recovered += 1
+            print(f"RECOVERED artifact: {artifact_dir}", flush=True)
+            break
 
 
 def source_is_unchanged(item: WorkItem) -> bool:
@@ -486,6 +558,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Retry unchanged documents previously quarantined in failures/",
     )
+    parser.add_argument(
+        "--recover-quarantined",
+        action="store_true",
+        help="Promote quarantined attempts that pass the current validator",
+    )
     return parser
 
 
@@ -501,6 +578,13 @@ def run(args: argparse.Namespace) -> int:
         directory.mkdir(parents=True, exist_ok=True)
 
     with exclusive_lock(state_root / "ocr.lock"):
+        if args.recover_quarantined:
+            recover_quarantined_artifacts(
+                artifact_root=artifact_root,
+                failure_root=failure_root,
+                summary=summary,
+            )
+
         work = discover_work(
             inbox=inbox,
             artifact_root=artifact_root,

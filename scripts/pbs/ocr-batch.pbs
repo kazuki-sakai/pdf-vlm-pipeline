@@ -55,6 +55,9 @@ OCR_ARGS=(--data-root "$DATA_ROOT")
 if [ "${PDF_VLM_RETRY_FAILED:-0}" = "1" ]; then
     OCR_ARGS+=(--retry-failed)
 fi
+if [ "${PDF_VLM_RECOVER_QUARANTINED:-0}" = "1" ]; then
+    OCR_ARGS+=(--recover-quarantined)
+fi
 
 apptainer exec --nv "$SIF_IMAGE" \
     python3 "$OCR_SCRIPT" \

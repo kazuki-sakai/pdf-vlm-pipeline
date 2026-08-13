@@ -38,3 +38,9 @@ qsub -v \
 PDF_VLM_DATA_ROOT=/path/to/data,PDF_VLM_RETRY_FAILED=1 \
 scripts/pbs/ocr-batch.pbs
 ```
+
+検証条件の更新後など、隔離済みの出力をOCRなしで再検証して復旧する場合は次のように指定します。
+
+```bash
+qsub -v PDF_VLM_RECOVER_QUARANTINED=1 scripts/pbs/ocr-batch.pbs
+```
