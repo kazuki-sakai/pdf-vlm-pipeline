@@ -87,10 +87,16 @@ OpenPBSがUUID形式で指定したGPUは、割当cgroup内のローカル番号
 
 ## 48時間vLLMサーバー
 
-検査完了後、本番用サーバーを投入します。
+検査完了後、本番用サーバーを投入します。このジョブは最初に`inbox/`のOCRバッチを実行し、その終了後に同じGPU割当のままvLLMを起動します。未処理PDFがなければPaddleOCR-VLモデルはロードされません。
 
 ```bash
 qsub scripts/pbs/qwen-server.pbs
+```
+
+OCRを明示的に省略する場合だけ、次のように指定します。
+
+```bash
+qsub -v PDF_VLM_RUN_OCR=0 scripts/pbs/qwen-server.pbs
 ```
 
 サーバーはRTX 3090を2枚使用して最大48時間稼働します。同じデータ領域に対する二重起動はロックで防止します。接続情報は次のファイルに保存されます。

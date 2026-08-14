@@ -12,6 +12,9 @@ DATA_ROOT="${PDF_VLM_DATA_ROOT:-$HOME/local/pdf-vlm}"
 MODEL_DIR="${PDF_VLM_MODEL_DIR:-$DATA_ROOT/models/Qwen3.6-35B-A3B-FP8}"
 SERVED_MODEL_NAME="${PDF_VLM_SERVED_MODEL_NAME:-qwen-research}"
 PORT="${PDF_VLM_VLLM_PORT:-18765}"
+PROJECT_ROOT="${PBS_O_WORKDIR:?PBS_O_WORKDIR is not set}"
+OCR_JOB_SCRIPT="$PROJECT_ROOT/scripts/pbs/ocr-batch.pbs"
+RUN_OCR="${PDF_VLM_RUN_OCR:-1}"
 STATE_ROOT="$DATA_ROOT/state"
 SECRET_ROOT="$DATA_ROOT/secrets"
 STATE_FILE="$STATE_ROOT/vllm-server.json"
@@ -30,6 +33,10 @@ if [ ! -r "$SIF_IMAGE" ]; then
 fi
 if [ ! -f "$MODEL_DIR/.complete" ]; then
     echo "FATAL: model is not marked complete: $MODEL_DIR" >&2
+    exit 1
+fi
+if [ "$RUN_OCR" = "1" ] && [ ! -r "$OCR_JOB_SCRIPT" ]; then
+    echo "FATAL: OCR job script not found or unreadable: $OCR_JOB_SCRIPT" >&2
     exit 1
 fi
 
@@ -198,6 +205,18 @@ if [ "${#ASSIGNED_GPU_UUIDS[@]}" -ne 2 ]; then
 fi
 export CUDA_VISIBLE_DEVICES="0,1"
 export APPTAINERENV_CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES"
+
+if [ "$RUN_OCR" = "1" ]; then
+    echo "=== Preflight OCR stage ==="
+    echo "Running pending-PDF conversion before loading vLLM."
+    # A PBS script is also a regular shell script. Running it with bash keeps
+    # the OCR and vLLM stages inside this same two-GPU allocation; its #PBS
+    # resource directives are comments in this context.
+    bash "$OCR_JOB_SCRIPT"
+    echo "Preflight OCR stage: complete"
+else
+    echo "Preflight OCR stage: skipped (PDF_VLM_RUN_OCR=$RUN_OCR)"
+fi
 
 export HF_HOME="$DATA_ROOT/cache/huggingface"
 export APPTAINERENV_HF_HOME="$HF_HOME"
