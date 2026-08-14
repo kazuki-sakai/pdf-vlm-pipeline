@@ -110,3 +110,20 @@ APIキーは初回起動時に生成され、次の所有者専用ファイル�
 ```bash
 python3 scripts/qwen-api-probe.py
 ```
+
+## ターミナル対話
+
+稼働中のサーバーへ接続して対話します。
+
+```bash
+python3 scripts/qwen-chat.py
+```
+
+対話中に画像またはMarkdownなどのUTF-8文書を次の発言へ添付できます。
+
+```text
+you> /attach ~/local/pdf-vlm/artifacts/<sha256>/merged/original.md
+you> この論文の新規性を簡潔に説明してください。
+```
+
+画像を添付する場合も同じ`/attach`を使います。本番サーバーの設定に合わせ、1回の発言へ添付できる画像は1枚です。`/help`で全コマンドを表示できます。
