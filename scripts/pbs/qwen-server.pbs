@@ -1,0 +1,272 @@
+#!/bin/bash
+#PBS -N pdf-vlm-qwen-server
+#PBS -q llm
+#PBS -l select=1:ncpus=10:mem=96gb:ngpus=2
+#PBS -l walltime=48:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+SIF_IMAGE="${PDF_VLM_VLLM_SIF:-$HOME/local/containers/vllm-openai-0.19.1.sif}"
+DATA_ROOT="${PDF_VLM_DATA_ROOT:-$HOME/local/pdf-vlm}"
+MODEL_DIR="${PDF_VLM_MODEL_DIR:-$DATA_ROOT/models/Qwen3.6-35B-A3B-FP8}"
+SERVED_MODEL_NAME="${PDF_VLM_SERVED_MODEL_NAME:-qwen-research}"
+PORT="${PDF_VLM_VLLM_PORT:-18765}"
+STATE_ROOT="$DATA_ROOT/state"
+SECRET_ROOT="$DATA_ROOT/secrets"
+STATE_FILE="$STATE_ROOT/vllm-server.json"
+LOCK_FILE="$STATE_ROOT/vllm-server.lock"
+API_KEY_FILE="$SECRET_ROOT/vllm-api-key"
+JOB_ID_SAFE="${PBS_JOBID:-pid-$$}"
+JOB_ID_SAFE="${JOB_ID_SAFE//[^A-Za-z0-9_.-]/_}"
+SERVER_LOG="$STATE_ROOT/vllm-server-$JOB_ID_SAFE.log"
+STARTED_AT="$(date --iso-8601=seconds)"
+SERVER_PID=""
+declare -a SERVER_PROCESS_IDS=()
+
+if [ ! -r "$SIF_IMAGE" ]; then
+    echo "FATAL: SIF not found or unreadable: $SIF_IMAGE" >&2
+    exit 1
+fi
+if [ ! -f "$MODEL_DIR/.complete" ]; then
+    echo "FATAL: model is not marked complete: $MODEL_DIR" >&2
+    exit 1
+fi
+
+mkdir -p "$STATE_ROOT" "$SECRET_ROOT" "$DATA_ROOT/cache/huggingface"
+chmod 700 "$SECRET_ROOT"
+
+# Keep this descriptor open for the lifetime of the PBS job. A second server
+# job using the same data root will fail before loading the model.
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+    echo "FATAL: another vLLM server job owns $LOCK_FILE" >&2
+    exit 2
+fi
+
+if [ ! -f "$API_KEY_FILE" ]; then
+    umask 077
+    API_KEY_TEMP="$API_KEY_FILE.tmp-$$"
+    python3 -c 'import secrets; print(secrets.token_urlsafe(48))' >"$API_KEY_TEMP"
+    mv "$API_KEY_TEMP" "$API_KEY_FILE"
+fi
+chmod 600 "$API_KEY_FILE"
+VLLM_API_KEY="$(tr -d '\r\n' <"$API_KEY_FILE")"
+if [ -z "$VLLM_API_KEY" ]; then
+    echo "FATAL: API key file is empty: $API_KEY_FILE" >&2
+    exit 1
+fi
+
+collect_process_tree() {
+    local root_pid="$1"
+    local -a pending_ids=("$root_pid")
+    local position=0
+
+    while [ "$position" -lt "${#pending_ids[@]}" ]; do
+        local parent_pid="${pending_ids[$position]}"
+        position=$((position + 1))
+        while read -r child_pid; do
+            if [ -n "$child_pid" ]; then
+                printf '%s\n' "$child_pid"
+                pending_ids+=("$child_pid")
+            fi
+        done < <(ps -o pid= --ppid "$parent_pid")
+    done
+}
+
+write_state() {
+    local status="$1"
+    local ready_at="${2:-}"
+    PDF_VLM_STATE_STATUS="$status" \
+    PDF_VLM_STATE_READY_AT="$ready_at" \
+    PDF_VLM_STATE_FILE="$STATE_FILE" \
+    PDF_VLM_STATE_NODE="$(hostname -s)" \
+    PDF_VLM_STATE_PORT="$PORT" \
+    PDF_VLM_STATE_MODEL="$SERVED_MODEL_NAME" \
+    PDF_VLM_STATE_MODEL_DIR="$MODEL_DIR" \
+    PDF_VLM_STATE_JOB_ID="${PBS_JOBID:-}" \
+    PDF_VLM_STATE_SERVER_PID="$SERVER_PID" \
+    PDF_VLM_STATE_STARTED_AT="$STARTED_AT" \
+    PDF_VLM_STATE_API_KEY_FILE="$API_KEY_FILE" \
+    python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+state_file = Path(os.environ["PDF_VLM_STATE_FILE"])
+node = os.environ["PDF_VLM_STATE_NODE"]
+port = int(os.environ["PDF_VLM_STATE_PORT"])
+state = {
+    "schema_version": 1,
+    "status": os.environ["PDF_VLM_STATE_STATUS"],
+    "node": node,
+    "port": port,
+    "base_url": f"http://{node}:{port}/v1",
+    "health_url": f"http://{node}:{port}/health",
+    "served_model_name": os.environ["PDF_VLM_STATE_MODEL"],
+    "model_directory": os.environ["PDF_VLM_STATE_MODEL_DIR"],
+    "pbs_job_id": os.environ.get("PDF_VLM_STATE_JOB_ID") or None,
+    "server_pid": int(os.environ["PDF_VLM_STATE_SERVER_PID"]),
+    "started_at": os.environ["PDF_VLM_STATE_STARTED_AT"],
+    "api_key_file": os.environ["PDF_VLM_STATE_API_KEY_FILE"],
+}
+ready_at = os.environ.get("PDF_VLM_STATE_READY_AT")
+if ready_at:
+    state["ready_at"] = ready_at
+
+temporary = state_file.with_name(f".{state_file.name}.tmp-{os.getpid()}")
+temporary.write_text(
+    json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8",
+)
+os.replace(temporary, state_file)
+PY
+}
+
+cleanup() {
+    local root_pid="$SERVER_PID"
+    if [ -n "$root_pid" ]; then
+        local -a current_ids=()
+        mapfile -t current_ids < <(collect_process_tree "$root_pid")
+        current_ids+=("$root_pid")
+        SERVER_PROCESS_IDS+=("${current_ids[@]}")
+
+        local -A seen_ids=()
+        local -a unique_ids=()
+        local process_id
+        for process_id in "${SERVER_PROCESS_IDS[@]}"; do
+            if [ -n "$process_id" ] && [ -z "${seen_ids[$process_id]:-}" ]; then
+                seen_ids[$process_id]=1
+                unique_ids+=("$process_id")
+            fi
+        done
+
+        echo "Stopping vLLM process tree: ${unique_ids[*]}"
+        kill -TERM "${unique_ids[@]}" 2>/dev/null || true
+        for _ in {1..60}; do
+            local any_alive=0
+            for process_id in "${unique_ids[@]}"; do
+                if kill -0 "$process_id" 2>/dev/null; then
+                    any_alive=1
+                    break
+                fi
+            done
+            if [ "$any_alive" -eq 0 ]; then
+                break
+            fi
+            sleep 1
+        done
+
+        local -a remaining_ids=()
+        for process_id in "${unique_ids[@]}"; do
+            if kill -0 "$process_id" 2>/dev/null; then
+                remaining_ids+=("$process_id")
+            fi
+        done
+        if [ "${#remaining_ids[@]}" -gt 0 ]; then
+            echo "Force-stopping remaining vLLM processes: ${remaining_ids[*]}"
+            kill -KILL "${remaining_ids[@]}" 2>/dev/null || true
+        fi
+        wait "$root_pid" 2>/dev/null || true
+    fi
+    SERVER_PID=""
+    rm -f "$STATE_FILE"
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
+echo "=== Qwen vLLM server ==="
+echo "Node: $(hostname)"
+echo "Model: $MODEL_DIR"
+echo "Served model: $SERVED_MODEL_NAME"
+echo "Port: $PORT"
+echo "State: $STATE_FILE"
+echo "API key file: $API_KEY_FILE"
+echo "Server log: $SERVER_LOG"
+echo "PBS CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+nvidia-smi -L
+
+# PBS already enforces the allocation through its device cgroup. vLLM 0.19.1
+# additionally requires integer CUDA_VISIBLE_DEVICES values.
+mapfile -t ASSIGNED_GPU_UUIDS < <(
+    nvidia-smi --query-gpu=uuid --format=csv,noheader
+)
+if [ "${#ASSIGNED_GPU_UUIDS[@]}" -ne 2 ]; then
+    echo "FATAL: expected exactly 2 cgroup-visible GPUs, found ${#ASSIGNED_GPU_UUIDS[@]}" >&2
+    exit 1
+fi
+export CUDA_VISIBLE_DEVICES="0,1"
+export APPTAINERENV_CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES"
+
+export HF_HOME="$DATA_ROOT/cache/huggingface"
+export APPTAINERENV_HF_HOME="$HF_HOME"
+export TOKENIZERS_PARALLELISM=false
+export APPTAINERENV_TOKENIZERS_PARALLELISM="$TOKENIZERS_PARALLELISM"
+export VLLM_API_KEY
+export APPTAINERENV_VLLM_API_KEY="$VLLM_API_KEY"
+
+echo "Starting vLLM..."
+apptainer exec --nv "$SIF_IMAGE" \
+    vllm serve "$MODEL_DIR" \
+    --host 0.0.0.0 \
+    --port "$PORT" \
+    --served-model-name "$SERVED_MODEL_NAME" \
+    --tensor-parallel-size 2 \
+    --distributed-executor-backend mp \
+    --max-model-len 16384 \
+    --max-num-batched-tokens 16384 \
+    --max-num-seqs 2 \
+    --gpu-memory-utilization 0.90 \
+    --limit-mm-per-prompt '{"image":1,"video":0}' \
+    --reasoning-parser qwen3 \
+    --enforce-eager \
+    >"$SERVER_LOG" 2>&1 &
+SERVER_PID=$!
+echo "vLLM launcher PID: $SERVER_PID"
+write_state "starting"
+
+READY=0
+for attempt in {1..360}; do
+    if curl --fail --silent --show-error \
+        --connect-timeout 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+        READY=1
+        break
+    fi
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "FATAL: vLLM exited before becoming ready" >&2
+        tail -n 200 "$SERVER_LOG" >&2 || true
+        exit 1
+    fi
+    if (( attempt % 12 == 0 )); then
+        echo "Waiting for vLLM readiness (${attempt} checks)..."
+        tail -n 5 "$SERVER_LOG" || true
+    fi
+    sleep 5
+done
+if [ "$READY" -ne 1 ]; then
+    echo "FATAL: vLLM did not become ready within 30 minutes" >&2
+    tail -n 200 "$SERVER_LOG" >&2 || true
+    exit 1
+fi
+
+mapfile -t SERVER_PROCESS_IDS < <(collect_process_tree "$SERVER_PID")
+SERVER_PROCESS_IDS+=("$SERVER_PID")
+
+curl --fail --silent --show-error \
+    -H "Authorization: Bearer $VLLM_API_KEY" \
+    "http://127.0.0.1:$PORT/v1/models" >/dev/null
+READY_AT="$(date --iso-8601=seconds)"
+write_state "ready" "$READY_AT"
+
+echo "vLLM server is ready: http://$(hostname -s):$PORT/v1"
+echo "PBS job ${PBS_JOBID:-<unset>} will keep it available for up to 48 hours."
+nvidia-smi --query-gpu=index,name,memory.used,memory.total,power.draw \
+    --format=csv,noheader
+
+set +e
+wait "$SERVER_PID"
+SERVER_STATUS=$?
+set -e
+echo "vLLM launcher exited with status $SERVER_STATUS"
+exit "$SERVER_STATUS"

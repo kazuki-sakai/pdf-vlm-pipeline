@@ -84,3 +84,23 @@ qsub scripts/pbs/qwen-server-probe.pbs
 ```
 
 OpenPBSがUUID形式で指定したGPUは、割当cgroup内のローカル番号へ変換してからvLLMへ渡します。
+
+## 48時間vLLMサーバー
+
+検査完了後、本番用サーバーを投入します。
+
+```bash
+qsub scripts/pbs/qwen-server.pbs
+```
+
+サーバーはRTX 3090を2枚使用して最大48時間稼働します。同じデータ領域に対する二重起動はロックで防止します。接続情報は次のファイルに保存されます。
+
+```text
+~/local/pdf-vlm/state/vllm-server.json
+```
+
+APIキーは初回起動時に生成され、次の所有者専用ファイルに保存されます。
+
+```text
+~/local/pdf-vlm/secrets/vllm-api-key
+```
