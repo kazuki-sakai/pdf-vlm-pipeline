@@ -46,10 +46,44 @@ echo "Served model: $SERVED_MODEL_NAME"
 echo "Port: $PORT"
 echo "Probe image: $PROBE_IMAGE"
 echo "Server log: $SERVER_LOG"
-echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+echo "PBS CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
 nvidia-smi -L
 nvidia-smi --query-gpu=index,name,uuid,memory.total,driver_version \
     --format=csv,noheader
+
+# OpenPBS selects the GPUs with UUIDs and also enforces the allocation through
+# the device cgroup. vLLM 0.19.1 assumes CUDA_VISIBLE_DEVICES contains integer
+# indices, so remap the two cgroup-visible devices to their local ordinals.
+mapfile -t ASSIGNED_GPU_UUIDS < <(
+    nvidia-smi --query-gpu=uuid --format=csv,noheader
+)
+if [ "${#ASSIGNED_GPU_UUIDS[@]}" -ne 2 ]; then
+    echo "FATAL: expected exactly 2 cgroup-visible GPUs, found ${#ASSIGNED_GPU_UUIDS[@]}" >&2
+    exit 1
+fi
+LOGICAL_CUDA_VISIBLE_DEVICES=""
+for ((index = 0; index < ${#ASSIGNED_GPU_UUIDS[@]}; index++)); do
+    if [ -n "$LOGICAL_CUDA_VISIBLE_DEVICES" ]; then
+        LOGICAL_CUDA_VISIBLE_DEVICES+=","
+    fi
+    LOGICAL_CUDA_VISIBLE_DEVICES+="$index"
+done
+export CUDA_VISIBLE_DEVICES="$LOGICAL_CUDA_VISIBLE_DEVICES"
+export APPTAINERENV_CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES"
+echo "vLLM CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+
+apptainer exec --nv "$SIF_IMAGE" python3 - <<'PY'
+import os
+import torch
+
+print("Container CUDA_VISIBLE_DEVICES:", os.environ.get("CUDA_VISIBLE_DEVICES"))
+print("Container visible GPU count:", torch.cuda.device_count())
+if torch.cuda.device_count() != 2:
+    raise RuntimeError("GPU ordinal normalization did not expose exactly 2 GPUs")
+for index in range(torch.cuda.device_count()):
+    print(f"Container device {index}: {torch.cuda.get_device_name(index)}")
+print("GPU ordinal normalization: OK")
+PY
 
 export HF_HOME="$DATA_ROOT/cache/huggingface"
 export APPTAINERENV_HF_HOME="$HF_HOME"

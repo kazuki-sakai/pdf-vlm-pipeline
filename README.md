@@ -82,3 +82,5 @@ qsub scripts/pbs/qwen-download.pbs
 ```bash
 qsub scripts/pbs/qwen-server-probe.pbs
 ```
+
+OpenPBSがUUID形式で指定したGPUは、割当cgroup内のローカル番号へ変換してからvLLMへ渡します。
