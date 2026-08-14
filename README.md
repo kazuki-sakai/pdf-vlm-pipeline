@@ -119,7 +119,19 @@ python3 scripts/qwen-api-probe.py
 
 ## ターミナル対話
 
-稼働中のサーバーへ接続して対話します。
+通常はセッションランチャーを使用します。認証済みサーバーが稼働中ならそのジョブを再利用し、なければ統合PBSジョブを1件だけ投入します。OCRとvLLMの準備完了後、対話CLIが起動します。
+
+```bash
+python3 scripts/pdf-vlm-session.py
+```
+
+サーバーの準備だけを行い、対話CLIを起動しない場合は次のように指定します。
+
+```bash
+python3 scripts/pdf-vlm-session.py --no-chat
+```
+
+すでに稼働しているサーバーへ直接接続する場合は、対話CLI単体も使用できます。
 
 ```bash
 python3 scripts/qwen-chat.py
