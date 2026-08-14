@@ -93,30 +93,20 @@ export APPTAINERENV_TOKENIZERS_PARALLELISM="$TOKENIZERS_PARALLELISM"
 SERVER_PID=""
 collect_process_tree() {
     local root_pid="$1"
-    ps -eo pid=,ppid= | awk -v root="$root_pid" '
-        {
-            pid[NR] = $1
-            parent[NR] = $2
-        }
-        END {
-            selected[root] = 1
-            changed = 1
-            while (changed) {
-                changed = 0
-                for (index = 1; index <= NR; index++) {
-                    if (selected[parent[index]] && !selected[pid[index]]) {
-                        selected[pid[index]] = 1
-                        changed = 1
-                    }
-                }
-            }
-            for (index = 1; index <= NR; index++) {
-                if (selected[pid[index]] && pid[index] != root) {
-                    print pid[index]
-                }
-            }
-        }
-    '
+    local -a pending_ids=("$root_pid")
+    local position=0
+
+    while [ "$position" -lt "${#pending_ids[@]}" ]; do
+        local parent_pid="${pending_ids[$position]}"
+        position=$((position + 1))
+
+        while read -r child_pid; do
+            if [ -n "$child_pid" ]; then
+                printf '%s\n' "$child_pid"
+                pending_ids+=("$child_pid")
+            fi
+        done < <(ps -o pid= --ppid "$parent_pid")
+    done
 }
 
 cleanup() {
