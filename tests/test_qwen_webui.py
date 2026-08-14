@@ -27,6 +27,9 @@ class QwenWebUITests(unittest.TestCase):
         merged = artifact / "merged"
         images = merged / "imgs"
         images.mkdir(parents=True)
+        raw_page = artifact / "raw" / "page-0001"
+        raw_images = raw_page / "imgs"
+        raw_images.mkdir(parents=True)
         (artifact / ".complete").touch()
         (artifact / "manifest.json").write_text(
             json.dumps(
@@ -40,6 +43,8 @@ class QwenWebUITests(unittest.TestCase):
         )
         (merged / "original.md").write_text("# Result\nAccurate.", encoding="utf-8")
         (images / "figure.png").write_bytes(b"png-data")
+        (raw_page / "original_0.md").write_text("# Page 1\nText.", encoding="utf-8")
+        (raw_images / "page-figure.jpg").write_bytes(b"jpg-data")
         return artifact
 
     def test_load_configuration_keeps_api_key_server_side(self) -> None:
@@ -117,6 +122,11 @@ class QwenWebUITests(unittest.TestCase):
             self.assertEqual(artifacts[0]["title"], "research-paper.pdf")
             self.assertEqual(artifacts[0]["markdown"][0]["path"], "merged/original.md")
             self.assertEqual(artifacts[0]["images"][0]["path"], "merged/imgs/figure.png")
+            self.assertEqual(artifacts[0]["pages"][0]["number"], 1)
+            self.assertEqual(
+                artifacts[0]["pages"][0]["markdown"][0]["path"],
+                "raw/page-0001/original_0.md",
+            )
 
     def test_load_artifact_markdown_and_image(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -136,6 +146,24 @@ class QwenWebUITests(unittest.TestCase):
             self.assertEqual(image["kind"], "image")
             self.assertTrue(image["data"].startswith("data:image/png;base64,"))
 
+    def test_load_raw_page_markdown_and_image(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            digest = "e" * 64
+            self.make_artifact(root, digest)
+
+            markdown = webui.load_artifact_attachment(
+                root, digest, "raw/page-0001/original_0.md"
+            )
+            image = webui.load_artifact_attachment(
+                root, digest, "raw/page-0001/imgs/page-figure.jpg"
+            )
+
+            self.assertEqual(markdown["kind"], "text")
+            self.assertIn("page 1", markdown["name"])
+            self.assertEqual(image["kind"], "image")
+            self.assertTrue(image["data"].startswith("data:image/jpeg;base64,"))
+
     def test_load_artifact_rejects_path_outside_merged_directory(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -147,6 +175,27 @@ class QwenWebUITests(unittest.TestCase):
                 webui.load_artifact_attachment(
                     root, digest, "merged/../manifest-secret.md"
                 )
+
+    def test_markdown_limit_can_be_increased(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            digest = "d" * 64
+            artifact = self.make_artifact(root, digest)
+            markdown_path = artifact / "merged" / "original.md"
+            markdown_path.write_text("x" * 50_000, encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "49152-byte"):
+                webui.load_artifact_attachment(
+                    root, digest, "merged/original.md"
+                )
+
+            attachment = webui.load_artifact_attachment(
+                root,
+                digest,
+                "merged/original.md",
+                max_text_attachment_bytes=65_536,
+            )
+            self.assertEqual(attachment["size"], 50_000)
 
 
 if __name__ == "__main__":

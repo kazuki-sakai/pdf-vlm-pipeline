@@ -132,13 +132,20 @@ python3 scripts/pdf-vlm-session.py --interface terminal
 python3 scripts/pdf-vlm-session.py --interface web
 ```
 
+Markdown添付の既定上限は48 KiBです。必要に応じて上限を変更できますが、モデルの16,384トークンのコンテキスト上限は超えられません。
+
+```bash
+python3 scripts/pdf-vlm-session.py --interface web --max-text-bytes 65536
+python3 scripts/pdf-vlm-session.py --interface terminal --max-text-bytes 65536
+```
+
 Web UIは`arcturus`のループバックアドレスだけで待ち受けます。Web UIを選択して起動したまま、ローカルPCの別ターミナルでSSHトンネルを作成します。
 
 ```bash
 ssh -N -L 18766:127.0.0.1:18766 arcturus
 ```
 
-その後、ローカルPCのブラウザで`http://127.0.0.1:18766`を開きます。Web UIの`▤`ボタンから、共有ホームにある完成済みartifactの結合Markdown・画像を直接添付できます。`＋`ボタンはローカルPC上のファイルを添付します。Web UIを`Ctrl-C`で終了してもPBS上のvLLMサーバーは停止しません。
+その後、ローカルPCのブラウザで`http://127.0.0.1:18766`を開きます。Web UIの`▤`ボタンから、共有ホームにある完成済みartifactの結合Markdown・画像を直接添付できます。結合Markdownが上限を超える場合は、OCRのページ別Markdown、またはページ別Markdownと同じページの画像1枚をまとめて添付できます。`＋`ボタンはローカルPC上のファイルを添付します。Web UIを`Ctrl-C`で終了してもPBS上のvLLMサーバーは停止しません。
 
 サーバーの準備だけを行い、対話CLIを起動しない場合は次のように指定します。
 

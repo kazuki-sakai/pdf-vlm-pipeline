@@ -29,10 +29,11 @@ IMAGE_SUFFIX_TO_MIME = {
     ".gif": "image/gif",
 }
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+PAGE_DIRECTORY_RE = re.compile(r"^page-(\d{4})$")
 MAX_REQUEST_BYTES = 30 * 1024 * 1024
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_TEXT_CHARS = 200_000
-MAX_TEXT_ATTACHMENT_BYTES = 48 * 1024
+DEFAULT_MAX_TEXT_ATTACHMENT_BYTES = 48 * 1024
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -76,12 +77,47 @@ def list_artifacts(data_root: Path) -> list[dict[str, Any]]:
         ):
             continue
         merged = artifact / "merged"
+        raw = artifact / "raw"
         markdown_files = sorted(path for path in merged.glob("*.md") if path.is_file())
         image_files = sorted(
             path
             for path in merged.rglob("*")
             if path.is_file() and path.suffix.lower() in IMAGE_SUFFIX_TO_MIME
         )
+        pages: list[dict[str, Any]] = []
+        for page_directory in sorted(path for path in raw.glob("page-*") if path.is_dir()):
+            page_match = PAGE_DIRECTORY_RE.fullmatch(page_directory.name)
+            if page_match is None:
+                continue
+            page_markdown = sorted(
+                path for path in page_directory.glob("*.md") if path.is_file()
+            )
+            page_images = sorted(
+                path
+                for path in page_directory.rglob("*")
+                if path.is_file() and path.suffix.lower() in IMAGE_SUFFIX_TO_MIME
+            )
+            pages.append(
+                {
+                    "number": int(page_match.group(1)),
+                    "markdown": [
+                        {
+                            "path": str(path.relative_to(artifact)),
+                            "name": path.name,
+                            "size": path.stat().st_size,
+                        }
+                        for path in page_markdown
+                    ],
+                    "images": [
+                        {
+                            "path": str(path.relative_to(artifact)),
+                            "name": path.name,
+                            "size": path.stat().st_size,
+                        }
+                        for path in page_images
+                    ],
+                }
+            )
         try:
             manifest = read_json(artifact / "manifest.json")
         except (OSError, ValueError, RuntimeError):
@@ -109,13 +145,17 @@ def list_artifacts(data_root: Path) -> list[dict[str, Any]]:
                     }
                     for path in image_files
                 ],
+                "pages": pages,
             }
         )
     return sorted(artifacts, key=lambda item: item["title"].casefold())
 
 
 def load_artifact_attachment(
-    data_root: Path, document_id: str, relative_path: str
+    data_root: Path,
+    document_id: str,
+    relative_path: str,
+    max_text_attachment_bytes: int = DEFAULT_MAX_TEXT_ATTACHMENT_BYTES,
 ) -> dict[str, Any]:
     if not DIGEST_RE.fullmatch(document_id):
         raise RuntimeError("invalid artifact ID")
@@ -124,11 +164,24 @@ def load_artifact_attachment(
         raise RuntimeError("artifact is not complete or does not exist")
 
     merged_root = (artifact / "merged").resolve()
+    raw_root = (artifact / "raw").resolve()
     target = (artifact / relative_path).resolve()
+    page_number: int | None = None
     try:
         target.relative_to(merged_root)
-    except ValueError as exc:
-        raise RuntimeError("attachment must be inside the artifact merged directory") from exc
+    except ValueError:
+        try:
+            raw_relative = target.relative_to(raw_root)
+        except ValueError as exc:
+            raise RuntimeError(
+                "attachment must be inside the artifact merged or raw page directory"
+            ) from exc
+        if not raw_relative.parts:
+            raise RuntimeError("raw attachment must belong to a page directory")
+        page_match = PAGE_DIRECTORY_RE.fullmatch(raw_relative.parts[0])
+        if page_match is None:
+            raise RuntimeError("raw attachment must belong to a page directory")
+        page_number = int(page_match.group(1))
     if not target.is_file():
         raise RuntimeError("artifact attachment does not exist")
 
@@ -137,13 +190,14 @@ def load_artifact_attachment(
     except (OSError, ValueError, RuntimeError):
         manifest = {}
     source_name = str(manifest.get("source_filename") or document_id[:12])
-    display_name = f"{source_name} · {target.name}"
+    page_label = f" · page {page_number}" if page_number is not None else ""
+    display_name = f"{source_name}{page_label} · {target.name}"
     size = target.stat().st_size
 
     if target.suffix.lower() == ".md":
-        if size > MAX_TEXT_ATTACHMENT_BYTES:
+        if size > max_text_attachment_bytes:
             raise RuntimeError(
-                f"Markdown exceeds the {MAX_TEXT_ATTACHMENT_BYTES}-byte attachment limit"
+                f"Markdown exceeds the {max_text_attachment_bytes}-byte attachment limit"
             )
         raw = target.read_bytes()
         if b"\x00" in raw:
@@ -282,6 +336,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
     data_root: Path
     configuration: dict[str, Any]
     max_tokens: int
+    max_text_attachment_bytes: int
 
     def security_headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -321,7 +376,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     "model": self.configuration["model"],
                     "pbs_job_id": self.configuration["pbs_job_id"],
                     "max_image_bytes": MAX_IMAGE_BYTES,
-                    "max_text_attachment_bytes": MAX_TEXT_ATTACHMENT_BYTES,
+                    "max_text_attachment_bytes": self.max_text_attachment_bytes,
                     "max_tokens": self.max_tokens,
                 },
             )
@@ -342,7 +397,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 document_id = query.get("document", [""])[0]
                 relative_path = query.get("path", [""])[0]
                 attachment = load_artifact_attachment(
-                    self.data_root, document_id, relative_path
+                    self.data_root,
+                    document_id,
+                    relative_path,
+                    self.max_text_attachment_bytes,
                 )
                 self.send_json(HTTPStatus.OK, attachment)
             except (OSError, ValueError, RuntimeError) as exc:
@@ -420,6 +478,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18766)
     parser.add_argument("--max-tokens", type=int, default=2048)
+    parser.add_argument(
+        "--max-text-bytes",
+        type=int,
+        default=DEFAULT_MAX_TEXT_ATTACHMENT_BYTES,
+    )
     return parser
 
 
@@ -432,6 +495,8 @@ def run(args: argparse.Namespace) -> int:
         raise RuntimeError("--port must be between 1 and 65535")
     if args.max_tokens <= 0:
         raise RuntimeError("--max-tokens must be positive")
+    if args.max_text_bytes <= 0:
+        raise RuntimeError("--max-text-bytes must be positive")
 
     data_root = args.data_root.expanduser().resolve()
     configuration = load_server_configuration(data_root)
@@ -442,6 +507,7 @@ def run(args: argparse.Namespace) -> int:
     WebUIHandler.data_root = data_root
     WebUIHandler.configuration = configuration
     WebUIHandler.max_tokens = args.max_tokens
+    WebUIHandler.max_text_attachment_bytes = args.max_text_bytes
 
     server = WebUIServer((args.host, args.port), WebUIHandler)
     print(f"Web UI ready: http://{args.host}:{args.port}")

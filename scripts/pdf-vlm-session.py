@@ -259,6 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--poll-seconds", type=float, default=10)
     parser.add_argument("--max-tokens", type=int, default=2048)
+    parser.add_argument("--max-text-bytes", type=int, default=48 * 1024)
     parser.add_argument(
         "--interface",
         choices=("ask", "terminal", "web", "none"),
@@ -305,6 +306,8 @@ def run(args: argparse.Namespace) -> int:
         raise RuntimeError("timeout and poll intervals must be positive")
     if args.max_tokens <= 0:
         raise RuntimeError("--max-tokens must be positive")
+    if args.max_text_bytes <= 0:
+        raise RuntimeError("--max-text-bytes must be positive")
     if not 1 <= args.web_port <= 65535:
         raise RuntimeError("--web-port must be between 1 and 65535")
 
@@ -351,6 +354,8 @@ def run(args: argparse.Namespace) -> int:
             str(data_root),
             "--max-tokens",
             str(args.max_tokens),
+            "--max-text-bytes",
+            str(args.max_text_bytes),
         ]
     else:
         client_script = project_root / "scripts" / "qwen-webui.py"
@@ -363,6 +368,8 @@ def run(args: argparse.Namespace) -> int:
             str(args.web_port),
             "--max-tokens",
             str(args.max_tokens),
+            "--max-text-bytes",
+            str(args.max_text_bytes),
         ]
     result = subprocess.run(
         client_arguments,

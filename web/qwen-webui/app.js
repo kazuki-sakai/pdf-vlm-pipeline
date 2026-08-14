@@ -174,20 +174,29 @@ async function queueFiles(files) {
   renderPending();
 }
 
-async function loadServerAttachment(documentId, path) {
+async function loadServerAttachments(documentId, paths) {
   clearError();
+  const previousPending = pending.slice();
   try {
-    const query = new URLSearchParams({document: documentId, path});
-    const response = await fetch(`/api/attachment?${query}`);
-    const attachment = await response.json();
-    if (!response.ok) throw new Error(attachment.error || `HTTP ${response.status}`);
-    addPendingAttachment(attachment);
+    for (const path of paths) {
+      const query = new URLSearchParams({document: documentId, path});
+      const response = await fetch(`/api/attachment?${query}`);
+      const attachment = await response.json();
+      if (!response.ok) throw new Error(attachment.error || `HTTP ${response.status}`);
+      addPendingAttachment(attachment);
+    }
     elements.artifactDialog.close();
     elements.prompt.focus();
   } catch (error) {
+    pending = previousPending;
+    renderPending();
     elements.artifactDialog.close();
     showError(`処理済み資料を添付できませんでした: ${error.message}`);
   }
+}
+
+function loadServerAttachment(documentId, path) {
+  return loadServerAttachments(documentId, [path]);
 }
 
 function renderArtifacts(artifacts) {
@@ -217,7 +226,11 @@ function renderArtifacts(artifacts) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "library-button";
-      button.textContent = `Markdownを添付 (${formatBytes(markdown.size)})`;
+      const tooLarge = markdown.size > configuration.max_text_attachment_bytes;
+      button.disabled = tooLarge;
+      button.textContent = tooLarge
+        ? `全文Markdownは上限超過 (${formatBytes(markdown.size)})`
+        : `全文Markdownを添付 (${formatBytes(markdown.size)})`;
       button.addEventListener("click", () => loadServerAttachment(artifact.id, markdown.path));
       actions.appendChild(button);
     }
@@ -240,6 +253,78 @@ function renderArtifacts(artifacts) {
       button.addEventListener("click", () => loadServerAttachment(artifact.id, select.value));
       imageRow.append(select, button);
       actions.appendChild(imageRow);
+    }
+
+    if (artifact.pages.length) {
+      const pagePicker = document.createElement("div");
+      pagePicker.className = "page-picker";
+      const pageHeading = document.createElement("div");
+      pageHeading.className = "picker-heading";
+      pageHeading.textContent = "ページ単位で添付";
+      const pageSelect = document.createElement("select");
+      pageSelect.setAttribute("aria-label", `${artifact.title}のページ`);
+      artifact.pages.forEach((page, index) => {
+        const option = document.createElement("option");
+        option.value = String(index);
+        const markdownSize = page.markdown[0] ? formatBytes(page.markdown[0].size) : "MDなし";
+        option.textContent = `Page ${page.number} · ${markdownSize} · 画像 ${page.images.length}枚`;
+        pageSelect.appendChild(option);
+      });
+
+      const pageImageSelect = document.createElement("select");
+      pageImageSelect.setAttribute("aria-label", `${artifact.title}のページ内画像`);
+      const markdownButton = document.createElement("button");
+      markdownButton.type = "button";
+      markdownButton.className = "library-button secondary";
+      markdownButton.textContent = "ページMarkdownを添付";
+      const combinedButton = document.createElement("button");
+      combinedButton.type = "button";
+      combinedButton.className = "library-button";
+      combinedButton.textContent = "ページMD＋選択画像を添付";
+
+      function selectedPage() {
+        return artifact.pages[Number(pageSelect.value)];
+      }
+
+      function updatePageControls() {
+        const page = selectedPage();
+        const markdown = page.markdown[0];
+        const markdownTooLarge = markdown && markdown.size > configuration.max_text_attachment_bytes;
+        markdownButton.disabled = !markdown || markdownTooLarge;
+        markdownButton.textContent = markdownTooLarge
+          ? `ページMarkdownは上限超過 (${formatBytes(markdown.size)})`
+          : "ページMarkdownを添付";
+        pageImageSelect.replaceChildren();
+        for (const image of page.images) {
+          const option = document.createElement("option");
+          option.value = image.path;
+          option.textContent = `${image.name} (${formatBytes(image.size)})`;
+          pageImageSelect.appendChild(option);
+        }
+        pageImageSelect.disabled = page.images.length === 0;
+        combinedButton.disabled = !markdown || markdownTooLarge || page.images.length === 0;
+      }
+
+      pageSelect.addEventListener("change", updatePageControls);
+      markdownButton.addEventListener("click", () => {
+        const markdown = selectedPage().markdown[0];
+        if (markdown) loadServerAttachment(artifact.id, markdown.path);
+      });
+      combinedButton.addEventListener("click", () => {
+        const markdown = selectedPage().markdown[0];
+        if (markdown && pageImageSelect.value) {
+          loadServerAttachments(artifact.id, [markdown.path, pageImageSelect.value]);
+        }
+      });
+      updatePageControls();
+      pagePicker.append(
+        pageHeading,
+        pageSelect,
+        pageImageSelect,
+        markdownButton,
+        combinedButton,
+      );
+      actions.appendChild(pagePicker);
     }
     card.appendChild(actions);
     elements.artifactList.appendChild(card);
