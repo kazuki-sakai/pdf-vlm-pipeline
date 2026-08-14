@@ -11,6 +11,10 @@ const elements = {
   send: document.querySelector("#send"),
   clear: document.querySelector("#clear"),
   fileInput: document.querySelector("#file-input"),
+  artifactButton: document.querySelector("#artifact-button"),
+  artifactDialog: document.querySelector("#artifact-dialog"),
+  artifactClose: document.querySelector("#artifact-close"),
+  artifactList: document.querySelector("#artifact-list"),
   attachmentList: document.querySelector("#attachment-list"),
   error: document.querySelector("#error"),
   serverLabel: document.querySelector("#server-label"),
@@ -94,6 +98,27 @@ function readAsDataURL(file) {
   });
 }
 
+function addPendingAttachment(attachment) {
+  if (!configuration) throw new Error("サーバー情報の取得を待っています。");
+  if (attachment.kind === "image") {
+    if (pending.some((item) => item.kind === "image")) {
+      throw new Error("1回の発言に添付できる画像は1枚です。");
+    }
+    if (attachment.size > configuration.max_image_bytes) {
+      throw new Error(`画像が大きすぎます（上限 ${formatBytes(configuration.max_image_bytes)}）。`);
+    }
+  } else {
+    const textBytes = pending
+      .filter((item) => item.kind === "text")
+      .reduce((total, item) => total + item.size, 0);
+    if (textBytes + attachment.size > configuration.max_text_attachment_bytes) {
+      throw new Error(`文書添付の合計が上限 ${formatBytes(configuration.max_text_attachment_bytes)} を超えます。`);
+    }
+  }
+  pending.push(attachment);
+  renderPending();
+}
+
 function imageMimeType(file) {
   const supported = ["image/jpeg", "image/png", "image/webp", "image/gif"];
   if (supported.includes(file.type)) return file.type;
@@ -127,7 +152,7 @@ async function queueFiles(files) {
         }
         const rawDataUrl = await readAsDataURL(file);
         const data = rawDataUrl.replace(/^data:[^;]*;/, `data:${imageMime};`);
-        pending.push({kind: "image", name: file.name, size: file.size, data});
+        addPendingAttachment({kind: "image", name: file.name, size: file.size, data});
       } else {
         const textBytes = pending
           .filter((item) => item.kind === "text")
@@ -139,7 +164,7 @@ async function queueFiles(files) {
         if (data.includes("\0")) {
           throw new Error(`${file.name} はテキストファイルとして読み込めません。`);
         }
-        pending.push({kind: "text", name: file.name, size: file.size, data});
+        addPendingAttachment({kind: "text", name: file.name, size: file.size, data});
       }
     } catch (error) {
       showError(`${file.name}: ${error.message}`);
@@ -147,6 +172,93 @@ async function queueFiles(files) {
   }
   elements.fileInput.value = "";
   renderPending();
+}
+
+async function loadServerAttachment(documentId, path) {
+  clearError();
+  try {
+    const query = new URLSearchParams({document: documentId, path});
+    const response = await fetch(`/api/attachment?${query}`);
+    const attachment = await response.json();
+    if (!response.ok) throw new Error(attachment.error || `HTTP ${response.status}`);
+    addPendingAttachment(attachment);
+    elements.artifactDialog.close();
+    elements.prompt.focus();
+  } catch (error) {
+    elements.artifactDialog.close();
+    showError(`処理済み資料を添付できませんでした: ${error.message}`);
+  }
+}
+
+function renderArtifacts(artifacts) {
+  elements.artifactList.replaceChildren();
+  if (!artifacts.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "完成済みの処理結果はありません。";
+    elements.artifactList.appendChild(empty);
+    return;
+  }
+
+  for (const artifact of artifacts) {
+    const card = document.createElement("section");
+    card.className = "artifact-card";
+    const heading = document.createElement("h3");
+    heading.textContent = artifact.title;
+    const meta = document.createElement("p");
+    meta.className = "artifact-meta";
+    const pages = Number.isInteger(artifact.page_count) ? `${artifact.page_count}ページ` : "ページ数不明";
+    meta.textContent = `${pages} · 画像 ${artifact.images.length}枚 · ${artifact.id.slice(0, 12)}`;
+    card.append(heading, meta);
+
+    const actions = document.createElement("div");
+    actions.className = "artifact-actions";
+    for (const markdown of artifact.markdown) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "library-button";
+      button.textContent = `Markdownを添付 (${formatBytes(markdown.size)})`;
+      button.addEventListener("click", () => loadServerAttachment(artifact.id, markdown.path));
+      actions.appendChild(button);
+    }
+
+    if (artifact.images.length) {
+      const imageRow = document.createElement("div");
+      imageRow.className = "image-picker";
+      const select = document.createElement("select");
+      select.setAttribute("aria-label", `${artifact.title}の画像`);
+      for (const image of artifact.images) {
+        const option = document.createElement("option");
+        option.value = image.path;
+        option.textContent = `${image.name} (${formatBytes(image.size)})`;
+        select.appendChild(option);
+      }
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "library-button secondary";
+      button.textContent = "選択画像を添付";
+      button.addEventListener("click", () => loadServerAttachment(artifact.id, select.value));
+      imageRow.append(select, button);
+      actions.appendChild(imageRow);
+    }
+    card.appendChild(actions);
+    elements.artifactList.appendChild(card);
+  }
+}
+
+async function openArtifactLibrary() {
+  clearError();
+  elements.artifactList.innerHTML = '<p class="muted">読み込み中…</p>';
+  elements.artifactDialog.showModal();
+  try {
+    const response = await fetch("/api/artifacts");
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    renderArtifacts(result.artifacts);
+  } catch (error) {
+    elements.artifactDialog.close();
+    showError(`処理済み資料を取得できませんでした: ${error.message}`);
+  }
 }
 
 function stripImages(history) {
@@ -229,6 +341,8 @@ async function initialize() {
 
 elements.send.addEventListener("click", sendMessage);
 elements.fileInput.addEventListener("change", (event) => queueFiles(event.target.files));
+elements.artifactButton.addEventListener("click", openArtifactLibrary);
+elements.artifactClose.addEventListener("click", () => elements.artifactDialog.close());
 elements.clear.addEventListener("click", () => {
   messages.splice(0);
   pending = [];

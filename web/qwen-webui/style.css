@@ -190,7 +190,7 @@ h1 { margin: 0; font-family: Georgia, "Yu Mincho", serif; font-size: 1.45rem; }
 
 .composer {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto auto 1fr auto;
   align-items: end;
   gap: 0.65rem;
   padding: 0.55rem;
@@ -250,6 +250,124 @@ h1 { margin: 0; font-family: Georgia, "Yu Mincho", serif; font-size: 1.45rem; }
 .text-button { padding: 0; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
 .text-button:hover { color: var(--accent); }
 
+.artifact-dialog {
+  width: min(760px, calc(100% - 2rem));
+  max-height: min(78vh, 780px);
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 1.2rem;
+  color: var(--ink);
+  background: var(--panel-solid);
+  box-shadow: var(--shadow);
+}
+
+.artifact-dialog::backdrop {
+  background: rgba(15, 20, 17, 0.58);
+  backdrop-filter: blur(4px);
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.25rem 1.35rem 0.8rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.dialog-header h2 {
+  margin: 0.1rem 0 0;
+  font-family: Georgia, "Yu Mincho", serif;
+  font-size: 1.45rem;
+}
+
+.dialog-close {
+  width: 2.3rem;
+  height: 2.3rem;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  cursor: pointer;
+  color: var(--muted);
+  background: transparent;
+  font-size: 1.25rem;
+}
+
+.dialog-note {
+  margin: 0;
+  padding: 0.85rem 1.35rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.6;
+}
+
+.artifact-library {
+  display: grid;
+  gap: 0.75rem;
+  max-height: 58vh;
+  padding: 0 1.35rem 1.35rem;
+  overflow-y: auto;
+}
+
+.artifact-card {
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 0.9rem;
+  background: var(--panel);
+}
+
+.artifact-card h3 {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.95rem;
+}
+
+.artifact-meta, .muted {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.73rem;
+}
+
+.artifact-actions {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.85rem;
+}
+
+.library-button, .image-picker select {
+  min-height: 2.25rem;
+  border: 1px solid var(--line);
+  border-radius: 0.65rem;
+}
+
+.library-button {
+  padding: 0.45rem 0.75rem;
+  cursor: pointer;
+  color: white;
+  background: var(--accent-strong);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.library-button.secondary {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.image-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
+}
+
+.image-picker select {
+  min-width: 0;
+  padding: 0.35rem 0.55rem;
+  color: var(--ink);
+  background: var(--panel-solid);
+  font-size: 0.73rem;
+}
+
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
 
 @media (max-width: 620px) {
@@ -259,4 +377,7 @@ h1 { margin: 0; font-family: Georgia, "Yu Mincho", serif; font-size: 1.45rem; }
   .message { width: 96%; }
   .composer-meta > span { display: none; }
   .composer-meta { justify-content: flex-end; }
+  .composer { gap: 0.4rem; }
+  .attach-button { min-width: 2.3rem; }
+  .image-picker { grid-template-columns: 1fr; }
 }

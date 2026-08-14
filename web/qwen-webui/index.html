@@ -34,10 +34,14 @@
         <div class="composer">
           <label class="attach-button" for="file-input" title="資料を添付">
             <span aria-hidden="true">＋</span>
-            <span class="sr-only">資料を添付</span>
+            <span class="sr-only">ローカル資料を添付</span>
           </label>
           <input id="file-input" type="file" multiple
             accept="image/jpeg,image/png,image/webp,image/gif,.md,.txt,.json,.csv,.tsv,.yaml,.yml,.tex,.html,.xml">
+          <button id="artifact-button" class="attach-button" type="button" title="処理済み資料を選ぶ">
+            <span aria-hidden="true">▤</span>
+            <span class="sr-only">処理済み資料を選ぶ</span>
+          </button>
           <textarea id="prompt" rows="1" placeholder="資料について質問する…" aria-label="メッセージ"></textarea>
           <button id="send" class="send-button" type="button" disabled>送信</button>
         </div>
@@ -47,5 +51,19 @@
         </div>
       </footer>
     </div>
+
+    <dialog id="artifact-dialog" class="artifact-dialog">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">PROCESSED ARTIFACTS</p>
+          <h2>処理済み資料</h2>
+        </div>
+        <button id="artifact-close" class="dialog-close" type="button" aria-label="閉じる">×</button>
+      </div>
+      <p class="dialog-note">PaddleOCR-VLが生成した結合済みMarkdownまたは画像を、次の発言へ添付します。</p>
+      <div id="artifact-list" class="artifact-library">
+        <p class="muted">読み込み中…</p>
+      </div>
+    </dialog>
   </body>
 </html>

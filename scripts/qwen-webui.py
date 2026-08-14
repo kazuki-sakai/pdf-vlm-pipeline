@@ -7,18 +7,28 @@ import argparse
 import base64
 import binascii
 import json
+import re
 import sys
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
 
 DIRECT_OPENER = build_opener(ProxyHandler({}))
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
 IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+IMAGE_SUFFIX_TO_MIME = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_REQUEST_BYTES = 30 * 1024 * 1024
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_TEXT_CHARS = 200_000
@@ -49,6 +59,112 @@ def load_server_configuration(data_root: Path) -> dict[str, Any]:
         "model": str(state["served_model_name"]),
         "pbs_job_id": state.get("pbs_job_id"),
         "api_key": api_key,
+    }
+
+
+def list_artifacts(data_root: Path) -> list[dict[str, Any]]:
+    artifact_root = data_root / "artifacts"
+    if not artifact_root.is_dir():
+        return []
+
+    artifacts: list[dict[str, Any]] = []
+    for artifact in artifact_root.iterdir():
+        if (
+            not artifact.is_dir()
+            or not DIGEST_RE.fullmatch(artifact.name)
+            or not (artifact / ".complete").is_file()
+        ):
+            continue
+        merged = artifact / "merged"
+        markdown_files = sorted(path for path in merged.glob("*.md") if path.is_file())
+        image_files = sorted(
+            path
+            for path in merged.rglob("*")
+            if path.is_file() and path.suffix.lower() in IMAGE_SUFFIX_TO_MIME
+        )
+        try:
+            manifest = read_json(artifact / "manifest.json")
+        except (OSError, ValueError, RuntimeError):
+            manifest = {}
+        title = str(manifest.get("source_filename") or artifact.name)
+        artifacts.append(
+            {
+                "id": artifact.name,
+                "title": title,
+                "page_count": manifest.get("page_count"),
+                "completed_at": manifest.get("completed_at"),
+                "markdown": [
+                    {
+                        "path": str(path.relative_to(artifact)),
+                        "name": path.name,
+                        "size": path.stat().st_size,
+                    }
+                    for path in markdown_files
+                ],
+                "images": [
+                    {
+                        "path": str(path.relative_to(artifact)),
+                        "name": path.name,
+                        "size": path.stat().st_size,
+                    }
+                    for path in image_files
+                ],
+            }
+        )
+    return sorted(artifacts, key=lambda item: item["title"].casefold())
+
+
+def load_artifact_attachment(
+    data_root: Path, document_id: str, relative_path: str
+) -> dict[str, Any]:
+    if not DIGEST_RE.fullmatch(document_id):
+        raise RuntimeError("invalid artifact ID")
+    artifact = data_root / "artifacts" / document_id
+    if not (artifact / ".complete").is_file():
+        raise RuntimeError("artifact is not complete or does not exist")
+
+    merged_root = (artifact / "merged").resolve()
+    target = (artifact / relative_path).resolve()
+    try:
+        target.relative_to(merged_root)
+    except ValueError as exc:
+        raise RuntimeError("attachment must be inside the artifact merged directory") from exc
+    if not target.is_file():
+        raise RuntimeError("artifact attachment does not exist")
+
+    try:
+        manifest = read_json(artifact / "manifest.json")
+    except (OSError, ValueError, RuntimeError):
+        manifest = {}
+    source_name = str(manifest.get("source_filename") or document_id[:12])
+    display_name = f"{source_name} · {target.name}"
+    size = target.stat().st_size
+
+    if target.suffix.lower() == ".md":
+        if size > MAX_TEXT_ATTACHMENT_BYTES:
+            raise RuntimeError(
+                f"Markdown exceeds the {MAX_TEXT_ATTACHMENT_BYTES}-byte attachment limit"
+            )
+        raw = target.read_bytes()
+        if b"\x00" in raw:
+            raise RuntimeError("Markdown contains binary data")
+        try:
+            data = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise RuntimeError("Markdown is not UTF-8") from exc
+        return {"kind": "text", "name": display_name, "size": size, "data": data}
+
+    mime_type = IMAGE_SUFFIX_TO_MIME.get(target.suffix.lower())
+    if mime_type is None:
+        raise RuntimeError("only merged Markdown and images may be attached")
+    if size > MAX_IMAGE_BYTES:
+        raise RuntimeError(f"image exceeds the {MAX_IMAGE_BYTES}-byte attachment limit")
+    encoded = base64.b64encode(target.read_bytes()).decode("ascii")
+    return {
+        "kind": "image",
+        "name": display_name,
+        "size": size,
+        "data": f"data:{mime_type};base64,{encoded}",
     }
 
 
@@ -163,6 +279,7 @@ def request_chat(
 
 class WebUIHandler(BaseHTTPRequestHandler):
     assets_root: Path
+    data_root: Path
     configuration: dict[str, Any]
     max_tokens: int
 
@@ -190,12 +307,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
         self.send_bytes(status, "application/json; charset=utf-8", payload)
 
     def do_GET(self) -> None:
+        parsed = urlsplit(self.path)
+        request_path = parsed.path
         assets = {
             "/": ("index.html", "text/html; charset=utf-8"),
             "/app.js": ("app.js", "text/javascript; charset=utf-8"),
             "/style.css": ("style.css", "text/css; charset=utf-8"),
         }
-        if self.path == "/api/status":
+        if request_path == "/api/status":
             self.send_json(
                 HTTPStatus.OK,
                 {
@@ -207,7 +326,29 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 },
             )
             return
-        asset = assets.get(self.path)
+        if request_path == "/api/artifacts":
+            try:
+                artifacts = list_artifacts(self.data_root)
+                self.send_json(HTTPStatus.OK, {"artifacts": artifacts})
+            except OSError as exc:
+                self.send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"error": f"artifact library unavailable: {exc}"},
+                )
+            return
+        if request_path == "/api/attachment":
+            try:
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                document_id = query.get("document", [""])[0]
+                relative_path = query.get("path", [""])[0]
+                attachment = load_artifact_attachment(
+                    self.data_root, document_id, relative_path
+                )
+                self.send_json(HTTPStatus.OK, attachment)
+            except (OSError, ValueError, RuntimeError) as exc:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        asset = assets.get(request_path)
         if asset is None:
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
@@ -298,6 +439,7 @@ def run(args: argparse.Namespace) -> int:
     if not assets_root.is_dir():
         raise RuntimeError(f"WebUI assets are missing: {assets_root}")
     WebUIHandler.assets_root = assets_root
+    WebUIHandler.data_root = data_root
     WebUIHandler.configuration = configuration
     WebUIHandler.max_tokens = args.max_tokens
 
