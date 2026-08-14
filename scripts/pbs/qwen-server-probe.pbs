@@ -91,20 +91,70 @@ export TOKENIZERS_PARALLELISM=false
 export APPTAINERENV_TOKENIZERS_PARALLELISM="$TOKENIZERS_PARALLELISM"
 
 SERVER_PID=""
+collect_process_tree() {
+    local root_pid="$1"
+    ps -eo pid=,ppid= | awk -v root="$root_pid" '
+        {
+            pid[NR] = $1
+            parent[NR] = $2
+        }
+        END {
+            selected[root] = 1
+            changed = 1
+            while (changed) {
+                changed = 0
+                for (index = 1; index <= NR; index++) {
+                    if (selected[parent[index]] && !selected[pid[index]]) {
+                        selected[pid[index]] = 1
+                        changed = 1
+                    }
+                }
+            }
+            for (index = 1; index <= NR; index++) {
+                if (selected[pid[index]] && pid[index] != root) {
+                    print pid[index]
+                }
+            }
+        }
+    '
+}
+
 cleanup() {
-    if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
-        echo "Stopping vLLM server process group $SERVER_PID..."
-        kill -TERM -- "-$SERVER_PID" 2>/dev/null || true
-        for _ in {1..30}; do
-            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    if [ -n "$SERVER_PID" ]; then
+        local root_pid="$SERVER_PID"
+        local -a process_ids=()
+        mapfile -t process_ids < <(collect_process_tree "$root_pid")
+        process_ids+=("$root_pid")
+
+        echo "Stopping vLLM process tree rooted at $root_pid: ${process_ids[*]}"
+        kill -TERM "${process_ids[@]}" 2>/dev/null || true
+        for _ in {1..60}; do
+            local any_alive=0
+            local process_id
+            for process_id in "${process_ids[@]}"; do
+                if kill -0 "$process_id" 2>/dev/null; then
+                    any_alive=1
+                    break
+                fi
+            done
+            if [ "$any_alive" -eq 0 ]; then
                 break
             fi
             sleep 1
         done
-        if kill -0 "$SERVER_PID" 2>/dev/null; then
-            kill -KILL -- "-$SERVER_PID" 2>/dev/null || true
+
+        local -a remaining_ids=()
+        local process_id
+        for process_id in "${process_ids[@]}"; do
+            if kill -0 "$process_id" 2>/dev/null; then
+                remaining_ids+=("$process_id")
+            fi
+        done
+        if [ "${#remaining_ids[@]}" -gt 0 ]; then
+            echo "Force-stopping remaining vLLM processes: ${remaining_ids[*]}"
+            kill -KILL "${remaining_ids[@]}" 2>/dev/null || true
         fi
-        wait "$SERVER_PID" 2>/dev/null || true
+        wait "$root_pid" 2>/dev/null || true
     fi
     SERVER_PID=""
 }
@@ -229,8 +279,23 @@ tail -n 80 "$SERVER_LOG"
 
 cleanup
 trap - EXIT TERM INT
-sleep 5
+
+GPU_RELEASED=0
+for _ in {1..60}; do
+    MAX_USED_MIB="$({
+        nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits
+    } | sort -nr | head -n 1)"
+    if [ "$MAX_USED_MIB" -lt 1024 ]; then
+        GPU_RELEASED=1
+        break
+    fi
+    sleep 1
+done
 echo "=== GPU after shutdown ==="
 nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu \
     --format=csv,noheader
+if [ "$GPU_RELEASED" -ne 1 ]; then
+    echo "FATAL: vLLM shutdown did not release GPU memory" >&2
+    exit 1
+fi
 echo "Qwen vLLM server probe: OK"
