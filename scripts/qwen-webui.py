@@ -7,8 +7,11 @@ import argparse
 import base64
 import binascii
 import json
+import os
 import re
 import sys
+import threading
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -34,6 +37,9 @@ MAX_REQUEST_BYTES = 30 * 1024 * 1024
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_TEXT_CHARS = 200_000
 DEFAULT_MAX_TEXT_ATTACHMENT_BYTES = 48 * 1024
+SUMMARY_CHUNK_CHARACTERS = 12_000
+SUMMARY_PROMPT_VERSION = 1
+SUMMARY_LOCK = threading.Lock()
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -41,6 +47,16 @@ def read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RuntimeError(f"expected a JSON object: {path}")
     return value
+
+
+def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    temporary.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
 
 
 def load_server_configuration(data_root: Path) -> dict[str, Any]:
@@ -298,6 +314,43 @@ def validate_messages(value: Any) -> list[dict[str, Any]]:
     return messages
 
 
+def split_markdown(text: str, max_characters: int = SUMMARY_CHUNK_CHARACTERS) -> list[str]:
+    if max_characters <= 0:
+        raise RuntimeError("summary chunk size must be positive")
+    if len(text) <= max_characters:
+        return [text]
+
+    chunks: list[str] = []
+    current = ""
+    for paragraph in re.split(r"(\n\s*\n)", text):
+        if not paragraph:
+            continue
+        while len(paragraph) > max_characters:
+            if current.strip():
+                chunks.append(current.strip())
+                current = ""
+            chunks.append(paragraph[:max_characters].strip())
+            paragraph = paragraph[max_characters:]
+        if len(current) + len(paragraph) > max_characters and current.strip():
+            chunks.append(current.strip())
+            current = paragraph
+        else:
+            current += paragraph
+    if current.strip():
+        chunks.append(current.strip())
+    return chunks
+
+
+def response_answer(result: dict[str, Any]) -> str:
+    message = result["choices"][0]["message"]
+    if not isinstance(message, dict):
+        raise RuntimeError(f"unexpected chat message: {message!r}")
+    answer = message.get("content") or message.get("reasoning_content") or ""
+    if not isinstance(answer, str) or not answer.strip():
+        raise RuntimeError("vLLM returned an empty response")
+    return answer.strip()
+
+
 def request_chat(
     *, base_url: str, api_key: str, model: str, messages: list[dict[str, Any]], max_tokens: int
 ) -> dict[str, Any]:
@@ -328,6 +381,207 @@ def request_chat(
         raise RuntimeError(f"vLLM returned HTTP {exc.code}: {detail}") from exc
     if not isinstance(result, dict):
         raise RuntimeError(f"unexpected vLLM response: {result!r}")
+    return result
+
+
+def summarize_artifact(
+    *,
+    data_root: Path,
+    configuration: dict[str, Any],
+    document_id: str,
+    include_images: bool,
+    final_max_tokens: int,
+) -> dict[str, Any]:
+    if not DIGEST_RE.fullmatch(document_id):
+        raise RuntimeError("invalid artifact ID")
+    artifact = next(
+        (item for item in list_artifacts(data_root) if item["id"] == document_id),
+        None,
+    )
+    if artifact is None:
+        raise RuntimeError("artifact is not complete or does not exist")
+    if not artifact["pages"]:
+        raise RuntimeError("artifact has no page-level Markdown")
+
+    image_mode = "images" if include_images else "text"
+    cache_path = (
+        data_root
+        / "summaries"
+        / document_id
+        / f"hierarchical-v{SUMMARY_PROMPT_VERSION}-{image_mode}.json"
+    )
+    try:
+        cached = read_json(cache_path)
+        if (
+            cached.get("prompt_version") == SUMMARY_PROMPT_VERSION
+            and cached.get("model") == configuration["model"]
+            and cached.get("include_images") == include_images
+            and cached.get("final_max_tokens") == final_max_tokens
+        ):
+            cached["cached"] = True
+            return cached
+    except (OSError, ValueError, RuntimeError):
+        pass
+
+    page_notes: list[dict[str, Any]] = []
+    page_max_tokens = min(384, final_max_tokens)
+    total_pages = len(artifact["pages"])
+    for position, page in enumerate(artifact["pages"], start=1):
+        if not page["markdown"]:
+            continue
+        markdown_record = page["markdown"][0]
+        markdown = load_artifact_attachment(
+            data_root,
+            document_id,
+            markdown_record["path"],
+            max_text_attachment_bytes=max(
+                int(markdown_record["size"]), DEFAULT_MAX_TEXT_ATTACHMENT_BYTES
+            ),
+        )
+        chunks = split_markdown(markdown["data"])
+
+        representative_image: dict[str, Any] | None = None
+        representative_record: dict[str, Any] | None = None
+        if include_images and page["images"]:
+            referenced = [
+                image
+                for image in page["images"]
+                if image["name"] in markdown["data"]
+            ]
+            candidates = referenced or page["images"]
+            representative_record = max(candidates, key=lambda image: image["size"])
+            representative_image = load_artifact_attachment(
+                data_root,
+                document_id,
+                representative_record["path"],
+            )
+
+        print(
+            f"Hierarchical summary {document_id[:12]}: "
+            f"page {position}/{total_pages}, chunks={len(chunks)}, "
+            f"image={representative_record['name'] if representative_record else 'none'}",
+            flush=True,
+        )
+        chunk_notes: list[str] = []
+        for chunk_number, chunk in enumerate(chunks, start=1):
+            prompt = (
+                f"以下は論文『{artifact['title']}』のPage {page['number']}、"
+                f"chunk {chunk_number}/{len(chunks)} のOCR Markdownです。\n\n"
+                f"{chunk}\n\n"
+                "論文全体を後で統合するためのページ別研究ノートを日本語で作成してください。"
+                "この入力に書かれた事実だけを使い、推測は推測と明記してください。"
+                "研究目的、方法、主要結果、数値・条件、全体での役割を簡潔に整理し、"
+                f"根拠ページを[Page {page['number']}]と表記してください。"
+            )
+            if representative_record is not None and chunk_number == 1:
+                prompt += (
+                    f" 添付画像は同ページの代表画像「{representative_record['name']}」です。"
+                    "本文との対応、軸・凡例・傾向、論文の主張をどう支えるかも記録してください。"
+                )
+            content: str | list[dict[str, Any]] = prompt
+            if representative_image is not None and chunk_number == 1:
+                content = [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": representative_image["data"]},
+                    },
+                    {"type": "text", "text": prompt},
+                ]
+            result = request_chat(
+                base_url=configuration["base_url"],
+                api_key=configuration["api_key"],
+                model=configuration["model"],
+                messages=[{"role": "user", "content": content}],
+                max_tokens=page_max_tokens,
+            )
+            chunk_notes.append(response_answer(result))
+
+        note = "\n\n".join(
+            f"[Page {page['number']} / chunk {index}]\n{value}"
+            for index, value in enumerate(chunk_notes, start=1)
+        )
+        page_notes.append(
+            {
+                "page": page["number"],
+                "note": note,
+                "representative_image": (
+                    representative_record["name"]
+                    if representative_record is not None
+                    else None
+                ),
+            }
+        )
+
+    if not page_notes:
+        raise RuntimeError("no page notes could be generated")
+    notes_text = "\n\n".join(item["note"] for item in page_notes)
+    note_groups = split_markdown(notes_text)
+    synthesis_sources: list[str] = []
+    if len(note_groups) == 1:
+        synthesis_sources = note_groups
+    else:
+        for group_number, group in enumerate(note_groups, start=1):
+            print(
+                f"Hierarchical summary {document_id[:12]}: "
+                f"consolidating note group {group_number}/{len(note_groups)}",
+                flush=True,
+            )
+            group_prompt = (
+                f"以下は論文『{artifact['title']}』のページ別研究ノートの一部 "
+                f"({group_number}/{len(note_groups)}) です。\n\n{group}\n\n"
+                "ページ参照[Page N]、主要な方法・結果・数値、図表の知見、注意点を保持したまま、"
+                "重複を除いて簡潔な中間統合ノートにしてください。新しい事実は追加しないでください。"
+            )
+            group_result = request_chat(
+                base_url=configuration["base_url"],
+                api_key=configuration["api_key"],
+                model=configuration["model"],
+                messages=[{"role": "user", "content": group_prompt}],
+                max_tokens=min(768, final_max_tokens),
+            )
+            synthesis_sources.append(response_answer(group_result))
+
+    synthesis_text = "\n\n".join(
+        f"[統合ノート {index}/{len(synthesis_sources)}]\n{value}"
+        for index, value in enumerate(synthesis_sources, start=1)
+    )
+    final_prompt = (
+        f"以下は論文『{artifact['title']}』をページごとに解析した研究ノートです。\n\n"
+        f"{synthesis_text}\n\n"
+        "ノート全体を統合し、日本語で階層的な論文要約を作成してください。"
+        "構成は「研究の背景と目的」「提案・解析手法」「主要結果」「図表から得られる知見」"
+        "「限界・注意点」「結論」としてください。ページ間の関係や論理の流れを示し、"
+        "重要な主張には[Page N]を付けてください。ノートにない事実は補わず、"
+        "矛盾や不確実な点があれば明記してください。"
+    )
+    print(
+        f"Hierarchical summary {document_id[:12]}: synthesizing {len(page_notes)} page notes",
+        flush=True,
+    )
+    final_result = request_chat(
+        base_url=configuration["base_url"],
+        api_key=configuration["api_key"],
+        model=configuration["model"],
+        messages=[{"role": "user", "content": final_prompt}],
+        max_tokens=final_max_tokens,
+    )
+    result = {
+        "schema_version": 1,
+        "prompt_version": SUMMARY_PROMPT_VERSION,
+        "document_id": document_id,
+        "title": artifact["title"],
+        "model": configuration["model"],
+        "include_images": include_images,
+        "final_max_tokens": final_max_tokens,
+        "page_count": len(page_notes),
+        "intermediate_note_count": len(synthesis_sources),
+        "page_notes": page_notes,
+        "context_notes": synthesis_text,
+        "answer": response_answer(final_result),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "cached": False,
+    }
+    atomic_write_json(cache_path, result)
     return result
 
 
@@ -422,7 +676,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         self.send_bytes(HTTPStatus.OK, content_type, payload)
 
     def do_POST(self) -> None:
-        if self.path != "/api/chat":
+        if self.path not in {"/api/chat", "/api/summarize"}:
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
         try:
@@ -438,6 +692,31 @@ class WebUIHandler(BaseHTTPRequestHandler):
             request_body = json.loads(raw.decode("utf-8"))
             if not isinstance(request_body, dict):
                 raise RuntimeError("request body must be an object")
+            if self.path == "/api/summarize":
+                document_id = request_body.get("document")
+                include_images = request_body.get("include_images", True)
+                if not isinstance(document_id, str):
+                    raise RuntimeError("document must be an artifact ID")
+                if not isinstance(include_images, bool):
+                    raise RuntimeError("include_images must be boolean")
+                if not SUMMARY_LOCK.acquire(blocking=False):
+                    self.send_json(
+                        HTTPStatus.CONFLICT,
+                        {"error": "another hierarchical summary is already running"},
+                    )
+                    return
+                try:
+                    summary = summarize_artifact(
+                        data_root=self.data_root,
+                        configuration=self.configuration,
+                        document_id=document_id,
+                        include_images=include_images,
+                        final_max_tokens=self.max_tokens,
+                    )
+                finally:
+                    SUMMARY_LOCK.release()
+                self.send_json(HTTPStatus.OK, summary)
+                return
             messages = validate_messages(request_body.get("messages"))
             result = request_chat(
                 base_url=self.configuration["base_url"],
@@ -446,15 +725,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 messages=messages,
                 max_tokens=self.max_tokens,
             )
-            message = result["choices"][0]["message"]
-            if not isinstance(message, dict):
-                raise RuntimeError(f"unexpected chat message: {message!r}")
-            answer = message.get("content") or message.get("reasoning_content") or ""
-            if not isinstance(answer, str) or not answer.strip():
-                raise RuntimeError("vLLM returned an empty response")
+            answer = response_answer(result)
             self.send_json(
                 HTTPStatus.OK,
-                {"answer": answer.strip(), "usage": result.get("usage", {})},
+                {"answer": answer, "usage": result.get("usage", {})},
             )
         except (OSError, ValueError, KeyError, RuntimeError, URLError) as exc:
             self.send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})

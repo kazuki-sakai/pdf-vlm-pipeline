@@ -5,6 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).parents[1] / "scripts" / "qwen-webui.py"
@@ -196,6 +197,60 @@ class QwenWebUITests(unittest.TestCase):
                 max_text_attachment_bytes=65_536,
             )
             self.assertEqual(attachment["size"], 50_000)
+
+    def test_split_markdown_preserves_all_text_in_bounded_chunks(self) -> None:
+        text = "first paragraph\n\n" + ("x" * 40)
+
+        chunks = webui.split_markdown(text, max_characters=20)
+
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(chunk) <= 20 for chunk in chunks))
+        self.assertEqual("".join(chunks).replace("\n", ""), text.replace("\n", ""))
+
+    def test_hierarchical_summary_uses_page_notes_and_cache(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            digest = "f" * 64
+            self.make_artifact(root, digest)
+            configuration = {
+                "base_url": "http://denebola:18765/v1",
+                "api_key": "secret",
+                "model": "qwen-research",
+            }
+            answers = iter(["Page 1 compact note.", "Integrated paper summary."])
+            calls = []
+
+            def fake_request_chat(**kwargs):
+                calls.append(kwargs)
+                return {
+                    "choices": [
+                        {"message": {"content": next(answers)}}
+                    ]
+                }
+
+            with patch.object(webui, "request_chat", side_effect=fake_request_chat):
+                first = webui.summarize_artifact(
+                    data_root=root,
+                    configuration=configuration,
+                    document_id=digest,
+                    include_images=True,
+                    final_max_tokens=1024,
+                )
+                second = webui.summarize_artifact(
+                    data_root=root,
+                    configuration=configuration,
+                    document_id=digest,
+                    include_images=True,
+                    final_max_tokens=1024,
+                )
+
+            self.assertEqual(len(calls), 2)
+            self.assertIsInstance(calls[0]["messages"][0]["content"], list)
+            self.assertEqual(first["answer"], "Integrated paper summary.")
+            self.assertEqual(first["page_count"], 1)
+            self.assertIn("Page 1 compact note.", first["context_notes"])
+            self.assertFalse(first["cached"])
+            self.assertTrue(second["cached"])
 
 
 if __name__ == "__main__":

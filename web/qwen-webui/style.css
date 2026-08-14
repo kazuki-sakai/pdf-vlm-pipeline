@@ -354,6 +354,19 @@ h1 { margin: 0; font-family: Georgia, "Yu Mincho", serif; font-size: 1.45rem; }
   background: var(--accent-soft);
 }
 
+.summary-action {
+  min-height: 2.7rem;
+  background: linear-gradient(135deg, var(--accent-strong), #287f70);
+  font-size: 0.86rem;
+}
+
+.summary-note {
+  margin: -0.15rem 0 0.25rem;
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.55;
+}
+
 .library-button:disabled {
   cursor: not-allowed;
   opacity: 0.5;

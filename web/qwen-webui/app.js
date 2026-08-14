@@ -66,6 +66,7 @@ function appendMessage(role, text, attachments = []) {
   article.appendChild(content);
   elements.messages.appendChild(article);
   scrollToBottom();
+  return article;
 }
 
 function renderPending() {
@@ -195,6 +196,67 @@ async function loadServerAttachments(documentId, paths) {
   }
 }
 
+async function summarizeArtifact(artifact) {
+  if (busy) return;
+  clearError();
+  elements.artifactDialog.close();
+  busy = true;
+  elements.send.disabled = true;
+  elements.prompt.disabled = true;
+  elements.clear.disabled = true;
+  elements.artifactButton.disabled = true;
+  elements.fileInput.disabled = true;
+  const working = appendMessage(
+    "assistant",
+    `「${artifact.title}」をページ単位で解析し、階層的要約を作成しています。\n` +
+      `対象: ${artifact.pages.length}ページ（各ページの代表画像を最大1枚解析）\n` +
+      "数分かかることがあります。この画面とSSH接続を開いたままお待ちください。",
+  );
+
+  try {
+    const response = await fetch("/api/summarize", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({document: artifact.id, include_images: true}),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+
+    messages.splice(0);
+    pending = [];
+    renderPending();
+    document.querySelectorAll(".message").forEach((node) => node.remove());
+    const contextMessage = {
+      role: "user",
+      content:
+        `以下は論文「${result.title}」をページ別に解析して圧縮した統合ノートです。\n\n` +
+        `${result.context_notes}\n\n` +
+        "以降の質問では、この統合ノートと階層的要約を根拠として回答してください。",
+    };
+    messages.push(contextMessage, {role: "assistant", content: result.answer});
+    appendMessage(
+      "user",
+      `「${result.title}」の階層的要約を作成してください。`,
+      [{kind: "text", name: `統合ノート · ${result.page_count}ページ`}],
+    );
+    appendMessage(
+      "assistant",
+      `${result.answer}\n\n${result.cached ? "（保存済み要約を再利用）" : "（ページ別解析から新規作成）"}`,
+    );
+  } catch (error) {
+    working.remove();
+    showError(`階層的要約を作成できませんでした: ${error.message}`);
+  } finally {
+    busy = false;
+    elements.send.disabled = false;
+    elements.prompt.disabled = false;
+    elements.clear.disabled = false;
+    elements.artifactButton.disabled = false;
+    elements.fileInput.disabled = false;
+    elements.prompt.focus();
+  }
+}
+
 function loadServerAttachment(documentId, path) {
   return loadServerAttachments(documentId, [path]);
 }
@@ -222,6 +284,16 @@ function renderArtifacts(artifacts) {
 
     const actions = document.createElement("div");
     actions.className = "artifact-actions";
+    const summaryButton = document.createElement("button");
+    summaryButton.type = "button";
+    summaryButton.className = "library-button summary-action";
+    summaryButton.textContent = "論文全体を階層的に要約";
+    summaryButton.addEventListener("click", () => summarizeArtifact(artifact));
+    actions.appendChild(summaryButton);
+    const summaryNote = document.createElement("p");
+    summaryNote.className = "summary-note";
+    summaryNote.textContent = "ページ別ノート → 中間統合 → 全体要約。各ページの代表画像を最大1枚解析します。";
+    actions.appendChild(summaryNote);
     for (const markdown of artifact.markdown) {
       const button = document.createElement("button");
       button.type = "button";
