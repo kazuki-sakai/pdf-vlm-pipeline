@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PDF VLM Research Chat</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">PDF VLM PIPELINE</p>
+          <h1>Research Chat</h1>
+        </div>
+        <div class="server-state" title="vLLM server status">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="server-label">接続確認中</span>
+        </div>
+      </header>
+
+      <main id="messages" class="messages" aria-live="polite">
+        <section class="welcome">
+          <p class="welcome-kicker">Qwen Research</p>
+          <h2>研究資料について対話する</h2>
+          <p>MarkdownなどのUTF-8文書と画像を添付できます。画像は1つの会話につき1枚が有効です。</p>
+        </section>
+      </main>
+
+      <footer class="composer-wrap">
+        <div id="attachment-list" class="attachment-list" hidden></div>
+        <div id="error" class="error" role="alert" hidden></div>
+        <div class="composer">
+          <label class="attach-button" for="file-input" title="資料を添付">
+            <span aria-hidden="true">＋</span>
+            <span class="sr-only">資料を添付</span>
+          </label>
+          <input id="file-input" type="file" multiple
+            accept="image/jpeg,image/png,image/webp,image/gif,.md,.txt,.json,.csv,.tsv,.yaml,.yml,.tex,.html,.xml">
+          <textarea id="prompt" rows="1" placeholder="資料について質問する…" aria-label="メッセージ"></textarea>
+          <button id="send" class="send-button" type="button" disabled>送信</button>
+        </div>
+        <div class="composer-meta">
+          <span>Ctrl / ⌘ + Enter で送信</span>
+          <button id="clear" class="text-button" type="button">会話をクリア</button>
+        </div>
+      </footer>
+    </div>
+  </body>
+</html>
