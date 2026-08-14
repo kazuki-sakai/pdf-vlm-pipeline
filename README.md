@@ -104,3 +104,9 @@ APIキーは初回起動時に生成され、次の所有者専用ファイル�
 ```text
 ~/local/pdf-vlm/secrets/vllm-api-key
 ```
+
+`arcturus`から状態・認証・モデル一覧・日本語応答をまとめて確認します。
+
+```bash
+python3 scripts/qwen-api-probe.py
+```
