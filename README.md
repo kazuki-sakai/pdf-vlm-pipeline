@@ -117,13 +117,28 @@ APIキーは初回起動時に生成され、次の所有者専用ファイル�
 python3 scripts/qwen-api-probe.py
 ```
 
-## ターミナル対話
+## 対話セッション
 
-通常はセッションランチャーを使用します。認証済みサーバーが稼働中ならそのジョブを再利用し、なければ統合PBSジョブを1件だけ投入します。OCRとvLLMの準備完了後、対話CLIが起動します。
+通常はセッションランチャーを使用します。認証済みサーバーが稼働中ならそのジョブを再利用し、なければ統合PBSジョブを1件だけ投入します。OCRとvLLMの準備完了後、ターミナルCLIまたはWeb UIを対話的に選択します。
 
 ```bash
 python3 scripts/pdf-vlm-session.py
 ```
+
+選択を省略して直接起動することもできます。
+
+```bash
+python3 scripts/pdf-vlm-session.py --interface terminal
+python3 scripts/pdf-vlm-session.py --interface web
+```
+
+Web UIは`arcturus`のループバックアドレスだけで待ち受けます。Web UIを選択して起動したまま、ローカルPCの別ターミナルでSSHトンネルを作成します。
+
+```bash
+ssh -N -L 18766:127.0.0.1:18766 arcturus
+```
+
+その後、ローカルPCのブラウザで`http://127.0.0.1:18766`を開きます。Web UIを`Ctrl-C`で終了してもPBS上のvLLMサーバーは停止しません。
 
 サーバーの準備だけを行い、対話CLIを起動しない場合は次のように指定します。
 

@@ -2,11 +2,12 @@ import importlib.util
 import json
 import sys
 import unittest
-from io import BytesIO
+from contextlib import redirect_stdout
+from io import BytesIO, StringIO
 from pathlib import Path
 from subprocess import CompletedProcess
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 
 
@@ -132,6 +133,24 @@ class PdfVlmSessionTests(unittest.TestCase):
             command = run.call_args.args[0]
             self.assertEqual(command[0], "qsub")
             self.assertIn(f"PDF_VLM_DATA_ROOT={data_root}", command)
+
+    def test_select_interface_accepts_web_choice(self) -> None:
+        fake_stdin = Mock()
+        fake_stdin.isatty.return_value = True
+        with (
+            patch.object(session.sys, "stdin", fake_stdin),
+            patch("builtins.input", return_value="2"),
+            redirect_stdout(StringIO()),
+        ):
+            selected = session.select_interface("ask", no_chat=False)
+
+        self.assertEqual(selected, "web")
+
+    def test_no_chat_overrides_interface(self) -> None:
+        self.assertEqual(
+            session.select_interface("web", no_chat=True),
+            "none",
+        )
 
 
 if __name__ == "__main__":

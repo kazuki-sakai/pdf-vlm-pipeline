@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ensure the PBS vLLM service is ready, then open the terminal chat client."""
+"""Ensure the PBS vLLM service is ready, then open a selected user interface."""
 
 from __future__ import annotations
 
@@ -258,13 +258,46 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum wait for queued job, OCR, and vLLM startup (default: 86400)",
     )
     parser.add_argument("--poll-seconds", type=float, default=10)
-    parser.add_argument("--max-tokens", type=int, default=1024)
+    parser.add_argument("--max-tokens", type=int, default=2048)
+    parser.add_argument(
+        "--interface",
+        choices=("ask", "terminal", "web", "none"),
+        default="ask",
+        help="User interface to open after startup (default: ask)",
+    )
+    parser.add_argument("--web-port", type=int, default=18766)
     parser.add_argument(
         "--no-chat",
         action="store_true",
-        help="Ensure the server is ready but do not open the terminal client",
+        help="Deprecated alias for --interface none",
     )
     return parser
+
+
+def select_interface(configured: str, *, no_chat: bool) -> str:
+    if no_chat or configured == "none":
+        return "none"
+    if configured != "ask":
+        return configured
+    if not sys.stdin.isatty():
+        return "terminal"
+
+    print("Select an interface:")
+    print("  1) Terminal CLI")
+    print("  2) Web UI (SSH tunnel)")
+    print("  3) Server only")
+    while True:
+        try:
+            choice = input("Choice [1]: ").strip().lower()
+        except EOFError:
+            return "terminal"
+        if choice in {"", "1", "terminal", "cli"}:
+            return "terminal"
+        if choice in {"2", "web", "webui"}:
+            return "web"
+        if choice in {"3", "none", "server"}:
+            return "none"
+        print("Please enter 1, 2, or 3.")
 
 
 def run(args: argparse.Namespace) -> int:
@@ -272,6 +305,8 @@ def run(args: argparse.Namespace) -> int:
         raise RuntimeError("timeout and poll intervals must be positive")
     if args.max_tokens <= 0:
         raise RuntimeError("--max-tokens must be positive")
+    if not 1 <= args.web_port <= 65535:
+        raise RuntimeError("--web-port must be between 1 and 65535")
 
     project_root = Path(__file__).resolve().parents[1]
     data_root = args.data_root.expanduser().resolve()
@@ -303,19 +338,34 @@ def run(args: argparse.Namespace) -> int:
         print(f"Reusing ready PBS job: {state.get('pbs_job_id')}")
 
     print(f"vLLM ready: {state['base_url']} ({state['served_model_name']})")
-    if args.no_chat:
+    interface = select_interface(args.interface, no_chat=args.no_chat)
+    if interface == "none":
         return 0
 
-    chat_script = project_root / "scripts" / "qwen-chat.py"
-    result = subprocess.run(
-        [
+    if interface == "terminal":
+        client_script = project_root / "scripts" / "qwen-chat.py"
+        client_arguments = [
             sys.executable,
-            str(chat_script),
+            str(client_script),
             "--data-root",
             str(data_root),
             "--max-tokens",
             str(args.max_tokens),
-        ],
+        ]
+    else:
+        client_script = project_root / "scripts" / "qwen-webui.py"
+        client_arguments = [
+            sys.executable,
+            str(client_script),
+            "--data-root",
+            str(data_root),
+            "--port",
+            str(args.web_port),
+            "--max-tokens",
+            str(args.max_tokens),
+        ]
+    result = subprocess.run(
+        client_arguments,
         cwd=project_root,
         check=False,
     )
