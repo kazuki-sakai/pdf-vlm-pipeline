@@ -40,14 +40,55 @@ function scrollToBottom() {
   elements.messages.scrollTop = elements.messages.scrollHeight;
 }
 
+async function copyText(text, button) {
+  const originalLabel = button.textContent;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const temporary = document.createElement("textarea");
+      temporary.value = text;
+      temporary.setAttribute("readonly", "");
+      temporary.style.position = "fixed";
+      temporary.style.opacity = "0";
+      document.body.appendChild(temporary);
+      temporary.select();
+      const copied = document.execCommand("copy");
+      temporary.remove();
+      if (!copied) throw new Error("copy command was rejected");
+    }
+    button.textContent = "コピー済み";
+    button.classList.add("copied");
+  } catch (error) {
+    showError(`応答をコピーできませんでした: ${error.message}`);
+    button.textContent = "失敗";
+  }
+  window.setTimeout(() => {
+    button.textContent = originalLabel;
+    button.classList.remove("copied");
+  }, 1600);
+}
+
 function appendMessage(role, text, attachments = []) {
   const article = document.createElement("article");
   article.className = `message ${role}`;
 
+  const header = document.createElement("div");
+  header.className = "message-header";
   const label = document.createElement("div");
   label.className = "message-label";
   label.textContent = role === "user" ? "You" : "Qwen";
-  article.appendChild(label);
+  header.appendChild(label);
+  if (role === "assistant") {
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "copy-button";
+    copy.textContent = "コピー";
+    copy.setAttribute("aria-label", "Qwenの応答をコピー");
+    copy.addEventListener("click", () => copyText(text, copy));
+    header.appendChild(copy);
+  }
+  article.appendChild(header);
 
   if (attachments.length) {
     const files = document.createElement("div");

@@ -128,8 +128,15 @@ h1 { margin: 0; font-family: Georgia, "Yu Mincho", serif; font-size: 1.45rem; }
 .message.user { margin-left: auto; }
 .message.assistant { margin-right: auto; }
 
-.message-label {
+.message-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 1.65rem;
   margin: 0 0 0.4rem 0.25rem;
+}
+
+.message-label {
   color: var(--muted);
   font-size: 0.72rem;
   font-weight: 700;
@@ -137,7 +144,28 @@ h1 { margin: 0; font-family: Georgia, "Yu Mincho", serif; font-size: 1.45rem; }
   text-transform: uppercase;
 }
 
-.message.user .message-label { text-align: right; margin-right: 0.25rem; }
+.message.user .message-header { justify-content: flex-end; margin-right: 0.25rem; }
+
+.copy-button {
+  padding: 0.22rem 0.55rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  cursor: pointer;
+  color: var(--muted);
+  background: transparent;
+  font-size: 0.69rem;
+}
+
+.copy-button:hover {
+  border-color: var(--line);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.copy-button.copied {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
 
 .message-content {
   padding: 1rem 1.15rem;
